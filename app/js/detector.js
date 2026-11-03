@@ -30,7 +30,11 @@ export class PersonDetector {
     });
     onStatus('Đang tải mô hình nhận diện…');
     try {
-      this.detector = await ObjectDetector.createFromOptions(fileset, opts('GPU'));
+      // Một số máy treo khi khởi tạo GPU: quá 15 giây thì chuyển sang CPU.
+      this.detector = await Promise.race([
+        ObjectDetector.createFromOptions(fileset, opts('GPU')),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('GPU timeout')), 15000)),
+      ]);
       this.delegate = 'GPU';
     } catch (e) {
       console.warn('GPU không khả dụng, chuyển sang CPU', e);

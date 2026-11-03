@@ -79,6 +79,7 @@ button { cursor: pointer; border: 0; border-radius: 12px; touch-action: manipula
 .rec.on .dot { border-radius: 4px; width: 18px; height: 18px; }
 #seekRow { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
 #seekRow .icon { width: 40px; height: 40px; font-size: 16px; }
+#seekRow .speed { font-size: 14px; font-weight: 800; color: var(--accent); }
 #seek { flex: 1; accent-color: var(--accent); }
 #timeOut { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); min-width: 42px; text-align: right; }
 .perf { font-size: 11px; color: var(--muted); text-align: center; margin-top: 4px; min-height: 14px; }

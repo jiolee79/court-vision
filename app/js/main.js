@@ -148,7 +148,11 @@ async function startSession(mode, file) {
   const video = document.createElement('video');
   video.playsInline = true;
   video.setAttribute('playsinline', '');
+  // Gắn vào trang (ẩn): một số trình duyệt không giải mã video nằm ngoài DOM.
+  video.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none';
+  document.body.appendChild(video);
   S.video = video;
+  S.endShown = false;
 
   try {
     if (mode === 'camera') {
@@ -162,9 +166,28 @@ async function startSession(mode, file) {
     } else {
       video.src = URL.createObjectURL(file);
       video.preload = 'auto';
-      await new Promise((res, rej) => { video.onloadeddata = res; video.onerror = () => rej(new Error('Không đọc được video này')); });
+      await waitFor(video, ['loadedmetadata'], 20000, 'Không đọc được video này (định dạng không hỗ trợ?)');
+      if (video.readyState < 2) {
+        // iPhone không tải khung hình nào khi video chưa phát: phát im lặng một chút rồi dừng.
+        loading('Đang đọc video…');
+        video.muted = true;
+        await video.play().catch(() => {});
+        await waitFor(video, ['loadeddata', 'canplay'], 10000).catch(() => {});
+        video.pause();
+        video.muted = false;
+      }
       video.currentTime = Math.min(0.5, video.duration / 3 || 0);
-      await new Promise((r) => (video.onseeked = r));
+      await waitFor(video, ['seeked'], 5000).catch(() => {});
+      if (!video.videoWidth) throw new Error('Không đọc được hình ảnh của video này');
+      // Hết video → tự mở bảng tổng kết (dùng sự kiện, không phụ thuộc vòng lặp vẽ).
+      video.addEventListener('ended', () => {
+        if (S.phase !== 'live' || S.endShown) return;
+        S.endShown = true;
+        S.rally.update(video.currentTime + 60);
+        updatePlayBtn();
+        renderSummary();
+        $('summary').classList.remove('hidden');
+      });
     }
   } catch (e) {
     loading('');
@@ -221,12 +244,33 @@ async function startSession(mode, file) {
   requestAnimationFrame(loop);
 }
 
+// Chờ một trong các sự kiện của video, có giới hạn thời gian để không bao giờ treo.
+function waitFor(el, events, ms, errMsg) {
+  return new Promise((resolve, reject) => {
+    const done = (fn, arg) => {
+      clearTimeout(timer);
+      events.forEach((ev) => el.removeEventListener(ev, ok));
+      el.removeEventListener('error', fail);
+      fn(arg);
+    };
+    const ok = () => done(resolve);
+    const fail = () => done(reject, new Error(errMsg || 'Lỗi đọc video'));
+    const timer = setTimeout(() => done(reject, new Error(errMsg || 'Hết thời gian chờ video')), ms);
+    events.forEach((ev) => el.addEventListener(ev, ok));
+    el.addEventListener('error', fail);
+  });
+}
+
 function goHome() {
   S.phase = 'idle';
   if (S.recorder.recording) S.recorder.stop();
   S.stream?.getTracks().forEach((t) => t.stop());
   S.stream = null;
-  if (S.video) { S.video.pause(); if (S.video.src) URL.revokeObjectURL(S.video.src); }
+  if (S.video) {
+    S.video.pause();
+    if (S.video.src) URL.revokeObjectURL(S.video.src);
+    S.video.remove();
+  }
   S.video = null;
   S.audioHits?.stop();
   S.audioCtx?.close();
@@ -325,7 +369,7 @@ $('btnCalibDone').addEventListener('click', async () => {
   S.roi = computeRoi();
   setCalibZoom(false);
   $('calibBar').classList.add('hidden');
-  loading('Đang chuẩn bị AI…');
+  loading('Đang tải mô hình AI… (lần đầu cần mạng, khoảng 10–30 giây)');
   const ok = await S.detectorReady;
   loading('');
   if (!S.video) return;
@@ -386,15 +430,21 @@ function loop() {
       S.tracker.update(dets, now);
     }
   }
-  if (playing()) S.tracker.tick(dtWall);
+  if (playing()) S.tracker.tick(dtWall * (S.mode === 'file' ? S.video.playbackRate : 1));
   S.rally.update(now);
 
   drawHud(ctx, S.W, S.H, { tracker: S.tracker, rally: S.rally, now, showTags: S.showTags });
 
-  if (S.mode === 'file') updateSeek();
+  if (S.mode === 'file') {
+    updateSeek();
+  }
   if (nowWall - (S.lastPerfUi || 0) > 1) {
     S.lastPerfUi = nowWall;
-    $('perf').textContent = `AI ${S.detector.delegate || '…'} · ${Math.round(S.inferMs)} ms · ${Math.round(1 / S.detectEvery)} lần/giây · ${Math.round(S.fps)} fps`;
+    const v = S.video;
+    const progress = S.mode === 'file' && v.duration
+      ? `Đã phân tích ${Math.round((v.currentTime / v.duration) * 100)}% · còn ~${fmtMin((v.duration - v.currentTime) / v.playbackRate)} · `
+      : '';
+    $('perf').textContent = `${progress}AI ${S.detector.delegate || '…'} · ${Math.round(1 / S.detectEvery)} lần/giây`;
   }
 }
 
@@ -485,11 +535,34 @@ $('btnHit').addEventListener('pointerdown', (e) => {
   navigator.vibrate?.(15);
 });
 
+function fmtMin(sec) {
+  const t = Math.max(0, Math.round(sec));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
 function updatePlayBtn() { $('btnPlay').textContent = S.video?.paused ? '▶' : '⏸'; }
 $('btnPlay').addEventListener('click', () => {
   if (!S.video) return;
-  S.video.paused ? S.video.play() : S.video.pause();
+  if (S.video.paused) {
+    if (S.video.ended) S.endShown = false;
+    S.video.play();
+  } else {
+    S.video.pause();
+  }
   updatePlayBtn();
+});
+
+// Phân tích nhanh hơn thời gian thực: video phát 1×/2×/3×.
+// Tắt giữ cao độ để tiếng đánh cầu không bị làm nhoè khi tua nhanh.
+const SPEEDS = [1, 2, 3];
+$('btnSpeed').addEventListener('click', () => {
+  if (!S.video) return;
+  const next = SPEEDS[(SPEEDS.indexOf(S.video.playbackRate) + 1) % SPEEDS.length] || 1;
+  S.video.preservesPitch = false;
+  S.video.webkitPreservesPitch = false;
+  S.video.playbackRate = next;
+  $('btnSpeed').textContent = `${next}×`;
+  if (next > 1) toast(`Phân tích ${next}× — nhanh hơn nhưng có thể sót vài chi tiết`, 2500);
 });
 let seeking = false;
 $('seek').addEventListener('input', (e) => {
