@@ -11,3 +11,4 @@ __pycache__/
 *.xlsx
 *.cvcache.pkl
 *.court.json
+kernel.errors.txt
