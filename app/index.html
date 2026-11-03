@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#081520">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Court Vision">
+  <title>Court Vision</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Màn hình chính: thiết lập trận đấu -->
+  <main id="home" class="screen active">
+    <header class="brand">
+      <img src="icons/icon.svg" alt="" width="44" height="44">
+      <div>
+        <h1>Court Vision</h1>
+        <p>Thống kê cầu lông trực tiếp bằng AI trên điện thoại</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>Trận đấu</h2>
+      <div class="seg" id="matchType">
+        <button data-v="doubles" class="on">Đánh đôi</button>
+        <button data-v="singles">Đánh đơn</button>
+      </div>
+      <div class="team">
+        <span class="team-label">Đội gần camera</span>
+        <input id="n0" maxlength="12" placeholder="Người 1" autocomplete="off">
+        <input id="n1" class="dbl" maxlength="12" placeholder="Người 2" autocomplete="off">
+      </div>
+      <div class="team">
+        <span class="team-label">Đội phía xa</span>
+        <input id="n2" maxlength="12" placeholder="Người 3" autocomplete="off">
+        <input id="n3" class="dbl" maxlength="12" placeholder="Người 4" autocomplete="off">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Phát hiện cú đánh</h2>
+      <div class="seg" id="hitMode">
+        <button data-v="audio" class="on">Nghe tiếng cầu</button>
+        <button data-v="manual">Bấm tay</button>
+      </div>
+      <label class="row">Độ nhạy <input type="range" id="sens" min="1" max="10" step="1" value="6"><output id="sensOut">6</output></label>
+      <h2 class="mt">Độ chính xác AI</h2>
+      <div class="seg" id="quality">
+        <button data-v="fast" class="on">Nhanh (tiết kiệm pin)</button>
+        <button data-v="accurate">Chính xác</button>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button id="btnCamera" class="primary big">📷 Quay trực tiếp</button>
+      <button id="btnFile" class="secondary big">🎞️ Phân tích video có sẵn</button>
+      <input id="fileInput" type="file" accept="video/*" hidden>
+    </div>
+    <p class="tip">Mẹo: đặt điện thoại trên chân máy phía sau biên cuối sân, nhìn thấy cả 4 góc sân.</p>
+    <p class="tip small" id="installTip"></p>
+  </main>
+
+  <!-- Màn hình phân tích -->
+  <section id="stage" class="screen">
+    <div id="viewWrap"><canvas id="view"></canvas></div>
+
+    <div id="calibBar" class="bar top hidden">
+      <p>Kéo 4 điểm vào <b>4 góc sân</b> (đường biên ngoài cùng). Lưới sẽ hiện màu vàng.</p>
+      <div class="bar-actions">
+        <button id="btnCalibZoom" class="ghost">🔍 Góc ngoài khung</button>
+        <button id="btnCalibReset" class="ghost">Đặt lại</button>
+        <button id="btnCalibDone" class="primary">Bắt đầu ▶</button>
+      </div>
+    </div>
+
+    <div id="liveBar" class="bar bottom hidden">
+      <div id="seekRow" class="hidden">
+        <button id="btnPlay" class="icon" aria-label="Phát/Tạm dừng">⏸</button>
+        <input id="seek" type="range" min="0" max="1000" value="0">
+        <span id="timeOut">0:00</span>
+      </div>
+      <div class="ctrl-row">
+        <button id="btnSettings" class="icon" aria-label="Cài đặt">⚙️</button>
+        <button id="btnRec" class="icon rec" aria-label="Ghi hình"><span class="dot"></span></button>
+        <button id="btnHit" class="hit">🏸 Cú đánh</button>
+        <button id="btnEnd" class="icon" aria-label="Kết thúc">⏹</button>
+      </div>
+      <div id="perf" class="perf"></div>
+    </div>
+
+    <div id="recBadge" class="rec-badge hidden">● REC <span id="recTime">0:00</span></div>
+    <div id="toast" class="toast hidden"></div>
+    <div id="loading" class="loading hidden"><div class="spinner"></div><p id="loadingText">Đang tải…</p></div>
+  </section>
+
+  <!-- Bảng cài đặt khi đang phân tích -->
+  <div id="sheet" class="sheet hidden">
+    <div class="sheet-body">
+      <div class="grab"></div>
+      <h2>Cài đặt</h2>
+      <div class="seg" id="hitMode2">
+        <button data-v="audio">Nghe tiếng cầu</button>
+        <button data-v="manual">Bấm tay</button>
+      </div>
+      <label class="row">Độ nhạy <input type="range" id="sens2" min="1" max="10" step="1"><output id="sensOut2"></output></label>
+      <label class="row check"><input type="checkbox" id="motionGate" checked> Chỉ tính tiếng đánh khi có người vung vợt (lọc tiếng sân bên)</label>
+      <label class="row check"><input type="checkbox" id="showTags" checked> Hiện tên trên đầu người chơi</label>
+      <div class="grid2">
+        <button id="swapNear" class="ghost">⇄ Đổi tên đội gần</button>
+        <button id="swapFar" class="ghost">⇄ Đổi tên đội xa</button>
+        <button id="swapEnds" class="ghost">↕ Hai đội đổi sân</button>
+        <button id="recalib" class="ghost">📐 Hiệu chỉnh lại sân</button>
+      </div>
+      <button id="sheetClose" class="primary wide">Xong</button>
+    </div>
+  </div>
+
+  <!-- Tổng kết trận -->
+  <div id="summary" class="sheet hidden">
+    <div class="sheet-body">
+      <div class="grab"></div>
+      <h2>Tổng kết</h2>
+      <div id="sumRallies" class="sum-stats"></div>
+      <table class="sum-table">
+        <thead><tr><th>Người chơi</th><th>Di chuyển</th><th>Chạy max</th><th>Cú đánh</th><th>Cầu nhanh nhất</th></tr></thead>
+        <tbody id="sumBody"></tbody>
+      </table>
+      <div class="grid2">
+        <button id="sumShare" class="ghost">📤 Chia sẻ kết quả</button>
+        <button id="sumBack" class="ghost">↩ Tiếp tục</button>
+      </div>
+      <button id="sumHome" class="primary wide">Về màn hình chính</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
