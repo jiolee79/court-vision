@@ -35,10 +35,12 @@ def blend(frame, rgba, x, y):
     if x0 >= x1 or y0 >= y1:
         return
     src = rgba[y0 - y:y1 - y, x0 - x:x1 - x]
-    # Tính bằng số nguyên 16-bit (nhanh hơn số thực ~4 lần); >> 8 xấp xỉ / 255.
-    a = src[..., 3:4].astype(np.uint16)
+    # Phép tính của OpenCV (SIMD, đa luồng) nhanh hơn numpy ~10 lần: out = dst·(1-a) + src·a
+    a = cv2.cvtColor(np.ascontiguousarray(src[..., 3]), cv2.COLOR_GRAY2BGR)
+    bgr = cv2.cvtColor(np.ascontiguousarray(src[..., :3]), cv2.COLOR_RGB2BGR)
     dst = frame[y0:y1, x0:x1]
-    frame[y0:y1, x0:x1] = ((dst * (256 - a) + src[..., 2::-1] * a) >> 8).astype(np.uint8)
+    keep = cv2.multiply(dst, cv2.bitwise_not(a), scale=1 / 255)
+    frame[y0:y1, x0:x1] = cv2.add(keep, cv2.multiply(bgr, a, scale=1 / 255))
 
 
 class HudRenderer:
@@ -244,12 +246,21 @@ def thumb(frame):
     return cv2.cvtColor(cv2.resize(frame, (64, 36), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
 
 
-def _open(video, threads=3):
-    if hasattr(cv2, "CAP_PROP_N_THREADS"):
-        cap = cv2.VideoCapture(str(video), cv2.CAP_FFMPEG, [cv2.CAP_PROP_N_THREADS, threads])
-        if cap.isOpened():
+def open_video(video):
+    """Mở video, ưu tiên giải mã bằng phần cứng (Intel Quick Sync/D3D11) để dành CPU cho AI."""
+    try:
+        cap = cv2.VideoCapture(str(video), cv2.CAP_FFMPEG,
+                               [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
+        if cap.isOpened() and cap.read()[0]:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             return cap
+        cap.release()
+    except cv2.error:
+        pass
     return cv2.VideoCapture(str(video))
+
+
+_open = open_video
 
 
 def _open_at(video, start_f, step, a0, ref_thumbs):
@@ -299,7 +310,7 @@ def _render_chunk(job):
         for _ in range(step - 1):
             cap.grab()
         hud.draw(frame, a)
-        writer.stdin.write(frame.tobytes())
+        writer.stdin.write(to_yuv(frame).tobytes())
     writer.stdin.close()
     writer.wait()
     cap.release()
@@ -335,14 +346,34 @@ def render_video(out_path, video, start_f, step, n, state, thumbs, start_s, dur_
     tmp.rmdir()
 
 
+@lru_cache(maxsize=1)
+def hw_encoder():
+    """Dùng bộ nén video phần cứng Intel Quick Sync nếu có (gần như không tốn CPU), không thì x264."""
+    test = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=black:s=640x360:d=0.2",
+            "-c:v", "h264_qsv", "-f", "null", "-"]
+    try:
+        ok = subprocess.run(test, capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    return ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "23"] if ok else \
+        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21"]
+
+
+def to_yuv(frame):
+    """BGR → YUV420 (I420): nhỏ bằng một nửa, đúng định dạng bộ nén cần."""
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)
+
+
 def open_writer(path, W, H, fps, audio_src=None, start_s=0.0, dur_s=None, threads=0):
-    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
+    """Ghi video từ các khung YUV420 (xem to_yuv) đẩy vào stdin."""
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{W}x{H}",
            "-r", f"{fps:.4f}", "-i", "-"]
     if audio_src:
         cmd += ["-ss", f"{start_s:.3f}"] + (["-t", f"{dur_s:.3f}"] if dur_s else []) + ["-i", str(audio_src),
                                                                                         "-map", "0:v", "-map", "1:a?"]
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p"]
-    if threads:
+    enc = hw_encoder()
+    cmd += enc + (["-pix_fmt", "nv12"] if "h264_qsv" in enc else ["-pix_fmt", "yuv420p"])
+    if threads and "libx264" in enc:
         cmd += ["-threads", str(threads)]
     if audio_src:
         cmd += ["-c:a", "aac", "-b:a", "128k", "-shortest"]

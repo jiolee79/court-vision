@@ -165,13 +165,19 @@ class ShuttleTracker:
             if len(self.pending) >= self.batch_windows:
                 self._run()
 
-    def flush(self):
+    def gap(self):
+        """Báo chuỗi khung bị ngắt (đoạn nghỉ được bỏ qua): khép cửa sổ đang dở bằng cách lặp khung cuối."""
         if self.window:
             last = self.window[-1]
             while len(self.window) < SEQ:
                 self.window.append((None, last[1]))
             self.pending.append(self.window)
             self.window = []
+            if len(self.pending) >= self.batch_windows:
+                self._run()
+
+    def flush(self):
+        self.gap()
         if self.pending:
             self._run()
         return self.results

@@ -21,7 +21,7 @@ from court import Court  # noqa: E402
 from events import (audio_onsets, build_player_series, build_rallies, clean_shuttle,  # noqa: E402
                     detect_hits, estimate_speeds)
 from players import IdentityAssigner, PoseRunner  # noqa: E402
-from render import render_video, thumb  # noqa: E402
+from render import open_video, render_video, thumb  # noqa: E402
 from report import write_excel  # noqa: E402
 from shuttle import (ShuttleTracker, TrackNetRunner, calibration_samples, ensure_int8,  # noqa: E402
                      median_background, plan_tiles, sample_frames)
@@ -36,6 +36,26 @@ def read_audio(path, start, dur, sr=22050):
           ["-i", str(path), "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
     raw = subprocess.run(cmd, capture_output=True).stdout
     return (np.frombuffer(raw, np.float32) if raw else None), sr
+
+
+def rally_mask(onsets, n, fps, before=2.0, after=3.0, max_gap=4.0):
+    """Khung nào có thể đang trong rally: quanh các chuỗi tiếng vợt cách nhau không quá max_gap giây."""
+    mask = np.zeros(n, bool)
+    if len(onsets) < 3:
+        mask[:] = True  # không nghe rõ (video không tiếng / quá ít) → quét toàn bộ cho chắc
+        return mask
+    groups, cur = [], [onsets[0]]
+    for t in onsets[1:]:
+        if t - cur[-1] <= max_gap:
+            cur.append(t)
+        else:
+            groups.append(cur)
+            cur = [t]
+    groups.append(cur)
+    for g in groups:
+        a, b = int((g[0] - before) * fps), int((g[-1] + after) * fps)
+        mask[max(0, a):min(n, b)] = True
+    return mask
 
 
 def frames(cap, start_frame, end_frame, step):
@@ -79,7 +99,7 @@ def main():
     args = ap.parse_args()
 
     video = Path(args.video).resolve()
-    cap = cv2.VideoCapture(str(video))
+    cap = open_video(video)
     if not cap.isOpened():
         sys.exit(f"Không mở được video: {video}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -128,6 +148,9 @@ def main():
     pose = PoseRunner(roi, size="s" if args.quality == "best" else "n", imgsz=960, int8_calib_frames=samples[:40])
     log(f"Cầu: TrackNetV3 {tracknet.desc} · Người: {pose.desc}")
 
+    pcm, sr = read_audio(video, args.start, (end_f - start_f) / fps)
+    onsets = audio_onsets(pcm, sr)
+
     # --- Lượt 1: nhận diện (lưu lại để lần sau đổi tên / xuất lại video không phải chạy AI lại)
     cache_file = video.with_suffix(".cvcache.pkl")
     cache_key = (start_f, end_f, step, args.quality, tuple(map(tuple, np.round(court.corners, 1))))
@@ -143,14 +166,23 @@ def main():
         raw_shuttle, pose_dets, thumbs = cached["shuttle"], cached["pose"], cached["thumbs"]
         log("Dùng kết quả nhận diện đã lưu (bỏ qua bước AI)")
     else:
+        # Nghe trước: đoạn không có tiếng vợt > 4 giây là lúc nghỉ → không cần quét quả cầu.
+        active = rally_mask(onsets, n, afps)
+        if active.mean() < 0.85:
+            log(f"Bỏ qua quét cầu ở {100 * (1 - active.mean()):.0f}% thời lượng (đoạn nghỉ giữa các rally)")
+        else:
+            active[:] = True  # sân ồn hoặc chơi liên tục: quét toàn bộ
         shuttle = ShuttleTracker(tracknet, tiles, medians)
         pose_every = 2 if args.quality == "fast" else 1
         pose_dets = {}
         thumbs = []
         for a, frame in enumerate(tqdm(frames(cap, start_f, end_f, step), total=n, desc="Nhận diện", unit="khung")):
-            shuttle.push(a, frame)
+            if active[min(a, n - 1)]:
+                shuttle.push(a, frame)
+            else:
+                shuttle.gap()
             thumbs.append(thumb(frame))
-            if a % pose_every == 0:
+            if a % (pose_every if active[min(a, n - 1)] else 6) == 0:  # lúc nghỉ: theo dõi người thưa hơn
                 pose.submit(a, frame)
             if a % 64 == 0:
                 pose_dets.update(pose.collect())
@@ -168,9 +200,7 @@ def main():
         ia.update(a, pose_dets[a])
     players = [build_player_series(t, n, afps) for t in ia.players]
     shuttle_xy = clean_shuttle(raw_shuttle, n, H)
-    pcm, sr = read_audio(video, args.start, (end_f - start_f) / fps)
-    onsets = audio_onsets(pcm, sr)
-    hits = detect_hits(shuttle_xy, players, afps, onsets)
+    hits =detect_hits(shuttle_xy, players, afps, onsets)
     estimate_speeds(hits, shuttle_xy, players, court, afps)
     rallies = build_rallies(hits, shuttle_xy, court, afps)
     for p in players:

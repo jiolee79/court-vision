@@ -22,9 +22,15 @@ Gồm hai phần dùng kết hợp:
 
 Dòng lệnh: `python analyzer/analyze.py video.mp4 --names "A,B,C,D" [--singles] [--start 60 --end 180] [--quality best]`
 
-**Thời gian xử lý** (CPU Intel i7-12700, không cần card đồ hoạ): khoảng 2–2.5 lần độ dài video
-với video quay dọc (quét cầu 2 ô), nhanh hơn với video quay ngang. Có thể chỉ phân tích một đoạn.
-Lần chạy đầu tiên mất thêm ~1 phút để nén mô hình AI (INT8).
+**Thời gian xử lý** (CPU Intel i7-12700, không cần card đồ hoạ): video quay dọc 7 phút ≈ 12–17 phút
+(nhận diện ~2/3, xuất video ~1/3). Nhanh hơn khi:
+- quay **ngang** (quét cầu 1 ô thay vì 2);
+- trận có nhiều lúc nghỉ — đoạn không có tiếng vợt > 4 giây được bỏ qua khi quét cầu;
+- chỉ phân tích một đoạn (ô *Chỉ phân tích đoạn*);
+- chạy lại cùng video (đổi tên, xuất lại): dùng kết quả AI đã lưu (`.cvcache.pkl`), chỉ mất vài phút.
+
+Tăng tốc đã dùng: OpenVINO + nén INT8 cho cả hai mô hình, giải mã và nén video bằng phần cứng Intel
+Quick Sync, xuất video trên nhiều tiến trình song song. Lần chạy đầu tiên mất thêm ~1 phút để nén mô hình.
 
 **Excel gồm:** Tổng quan · Người chơi (quãng đường, tốc độ chạy, số cú, cầu nhanh nhất) · Rally
 (thời gian, số cú, người đánh cuối, cầu rơi trong/ngoài – ước tính) · Cú đánh (từng cú, ai đánh, tốc độ).
