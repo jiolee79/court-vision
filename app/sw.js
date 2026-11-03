@@ -1,5 +1,5 @@
 // Service worker: lưu app + thư viện AI + mô hình vào bộ nhớ đệm để mở nhanh và dùng được khi mất mạng.
-const VERSION = 'cv-v2';
+const VERSION = 'cv-v3';
 const SHELL = [
   './',
   'index.html',

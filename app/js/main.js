@@ -1,7 +1,7 @@
 import { COURT } from './court.js';
 import { solveHomography, invertH, applyH } from './homography.js';
 import { PersonDetector } from './detector.js';
-import { Tracker } from './tracker.js';
+import { Tracker, colorSignature } from './tracker.js';
 import { AudioHits, RallyEngine } from './hits.js';
 import { drawHud, drawCourtOverlay, formatClock } from './hud.js';
 import { HudRecorder, saveBlob } from './recorder.js';
@@ -427,6 +427,7 @@ function loop() {
       S.inferMs += 0.2 * (ms - S.inferMs);
       // Tự điều chỉnh tần suất nhận diện theo sức mạnh máy: AI chiếm tối đa ~40% thời gian.
       S.detectEvery = Math.min(0.25, Math.max(0.05, (S.inferMs / 1000) * 2.5));
+      addSignatures(dets);
       S.tracker.update(dets, now);
     }
   }
@@ -445,6 +446,18 @@ function loop() {
       ? `Đã phân tích ${Math.round((v.currentTime / v.duration) * 100)}% · còn ~${fmtMin((v.duration - v.currentTime) / v.playbackRate)} · `
       : '';
     $('perf').textContent = `${progress}AI ${S.detector.delegate || '…'} · ${Math.round(1 / S.detectEvery)} lần/giây`;
+  }
+}
+
+// Màu áo của từng người phát hiện được (vùng ngực), lấy mẫu 8x12 điểm ảnh — rất rẻ.
+const sigCanvas = document.createElement('canvas');
+sigCanvas.width = 8;
+sigCanvas.height = 12;
+const sigCtx = sigCanvas.getContext('2d', { willReadFrequently: true });
+function addSignatures(dets) {
+  for (const d of dets) {
+    sigCtx.drawImage(S.canvas, d.x + d.w * 0.25, d.y + d.h * 0.18, d.w * 0.5, d.h * 0.35, 0, 0, 8, 12);
+    d.sig = colorSignature(sigCtx.getImageData(0, 0, 8, 12).data);
   }
 }
 

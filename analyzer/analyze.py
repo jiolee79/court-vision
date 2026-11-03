@@ -1,0 +1,202 @@
+"""Court Vision PC — phân tích video cầu lông: theo dõi người + quả cầu, xuất video HUD và Excel.
+
+    python analyze.py VIDEO [--names "A,B,C,D"] [--singles] [--start 0] [--end 0] [--quality fast|best]
+"""
+import argparse
+import os
+import pickle
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from calibrate import calibrate  # noqa: E402
+from court import Court  # noqa: E402
+from events import (audio_onsets, build_player_series, build_rallies, clean_shuttle,  # noqa: E402
+                    detect_hits, estimate_speeds)
+from players import IdentityAssigner, PoseRunner  # noqa: E402
+from render import render_video, thumb  # noqa: E402
+from report import write_excel  # noqa: E402
+from shuttle import (ShuttleTracker, TrackNetRunner, calibration_samples, ensure_int8,  # noqa: E402
+                     median_background, plan_tiles, sample_frames)
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def read_audio(path, start, dur, sr=22050):
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}"] + (["-t", f"{dur:.3f}"] if dur else []) + \
+          ["-i", str(path), "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"]
+    raw = subprocess.run(cmd, capture_output=True).stdout
+    return (np.frombuffer(raw, np.float32) if raw else None), sr
+
+
+def frames(cap, start_frame, end_frame, step):
+    """Đọc khung tuần tự trên luồng riêng (giải mã song song với AI), bỏ bớt khung khi video 60 fps."""
+    import queue
+    import threading
+    q = queue.Queue(maxsize=48)
+
+    def reader():
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        i = start_frame
+        while i < end_frame:
+            if (i - start_frame) % step:
+                if not cap.grab():
+                    break
+            else:
+                ok, f = cap.read()
+                if not ok:
+                    break
+                q.put(f)
+            i += 1
+        q.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+    while (f := q.get()) is not None:
+        yield f
+
+
+def main():
+    for stream in (sys.stdout, sys.stderr):  # console Windows mặc định cp1252, không in được tiếng Việt
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("video")
+    ap.add_argument("--names", default="", help="Tên người chơi, cách nhau dấu phẩy: gần-trái, gần-phải, xa-trái, xa-phải")
+    ap.add_argument("--singles", action="store_true", help="Đánh đơn (2 người)")
+    ap.add_argument("--start", type=float, default=0, help="Bắt đầu từ giây thứ")
+    ap.add_argument("--end", type=float, default=0, help="Kết thúc ở giây thứ (0 = hết video)")
+    ap.add_argument("--quality", choices=["fast", "best"], default="fast")
+    ap.add_argument("--recalibrate", action="store_true", help="Hiệu chỉnh lại sân dù đã có file lưu")
+    ap.add_argument("--out", default="", help="Thư mục kết quả (mặc định: cạnh video)")
+    args = ap.parse_args()
+
+    video = Path(args.video).resolve()
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        sys.exit(f"Không mở được video: {video}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    step = 2 if fps > 40 else 1               # TrackNet học ở ~30 fps
+    afps = fps / step
+    start_f = int(args.start * fps)
+    end_f = min(total, int(args.end * fps)) if args.end else total
+    n = len(range(start_f, end_f, step))
+    log(f"Video {W}x{H}, {fps:.1f} fps, {total / fps / 60:.1f} phút → phân tích {n} khung ở {afps:.0f} fps")
+
+    out_dir = Path(args.out) if args.out else video.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = video.stem + (f"_{int(args.start)}-{int(args.end)}s" if args.start or args.end else "")
+
+    # --- Hiệu chỉnh sân (lưu cạnh video để lần sau dùng lại)
+    court_file = video.with_suffix(".court.json")
+    court = None
+    if court_file.exists() and not args.recalibrate:
+        court = Court.load(court_file, W, H)
+        log(f"Dùng hiệu chỉnh sân đã lưu: {court_file.name}")
+    else:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, min(total - 1, start_f + int(fps)))
+        ok, frame0 = cap.read()
+        court = calibrate(frame0)
+        if court is None:
+            sys.exit("Đã huỷ hiệu chỉnh sân.")
+        court.save(court_file, W, H)
+
+    names = [s.strip() for s in args.names.split(",") if s.strip()]
+    need = 2 if args.singles else 4
+    defaults = ["Người 1", "Người 2", "Người 3", "Người 4"]
+    names = (names + defaults[len(names):need])[:need] if not args.singles else \
+        (names + ["Người 1", "Người 3"][len(names):])[:2]
+
+    # --- Chuẩn bị mô hình
+    t0 = time.time()
+    tiles = plan_tiles(court, W, H)
+    roi = court.roi(W, H)
+    log(f"Chuẩn bị AI ({len(tiles)} ô quét cầu)…")
+    samples = sample_frames(video, W, H, total / fps)
+    medians = median_background(samples, tiles)
+    ensure_int8(lambda: calibration_samples(video, tiles, medians))
+    tracknet = TrackNetRunner(int8=True)
+    pose = PoseRunner(roi, size="s" if args.quality == "best" else "n", imgsz=960, int8_calib_frames=samples[:40])
+    log(f"Cầu: TrackNetV3 {tracknet.desc} · Người: {pose.desc}")
+
+    # --- Lượt 1: nhận diện (lưu lại để lần sau đổi tên / xuất lại video không phải chạy AI lại)
+    cache_file = video.with_suffix(".cvcache.pkl")
+    cache_key = (start_f, end_f, step, args.quality, tuple(map(tuple, np.round(court.corners, 1))))
+    cached = None
+    if cache_file.exists():
+        try:
+            cached = pickle.loads(cache_file.read_bytes())
+            if cached.get("key") != cache_key:
+                cached = None
+        except Exception:  # noqa: BLE001 — file hỏng thì chạy lại
+            cached = None
+    if cached:
+        raw_shuttle, pose_dets, thumbs = cached["shuttle"], cached["pose"], cached["thumbs"]
+        log("Dùng kết quả nhận diện đã lưu (bỏ qua bước AI)")
+    else:
+        shuttle = ShuttleTracker(tracknet, tiles, medians)
+        pose_every = 2 if args.quality == "fast" else 1
+        pose_dets = {}
+        thumbs = []
+        for a, frame in enumerate(tqdm(frames(cap, start_f, end_f, step), total=n, desc="Nhận diện", unit="khung")):
+            shuttle.push(a, frame)
+            thumbs.append(thumb(frame))
+            if a % pose_every == 0:
+                pose.submit(a, frame)
+            if a % 64 == 0:
+                pose_dets.update(pose.collect())
+        raw_shuttle = shuttle.flush()
+        pose_dets.update(pose.collect(wait=True))
+        thumbs = np.array(thumbs)
+        cache_file.write_bytes(pickle.dumps({"key": cache_key, "shuttle": raw_shuttle, "pose": pose_dets,
+                                             "thumbs": thumbs}))
+        log(f"Nhận diện xong sau {time.time() - t0:.0f}s")
+    n = max(len(thumbs), max(raw_shuttle, default=0) + 1)
+
+    # --- Ghép người, cú đánh, rally
+    ia = IdentityAssigner(court, names, args.singles, afps)
+    for a in sorted(pose_dets):
+        ia.update(a, pose_dets[a])
+    players = [build_player_series(t, n, afps) for t in ia.players]
+    shuttle_xy = clean_shuttle(raw_shuttle, n, H)
+    pcm, sr = read_audio(video, args.start, (end_f - start_f) / fps)
+    onsets = audio_onsets(pcm, sr)
+    hits = detect_hits(shuttle_xy, players, afps, onsets)
+    estimate_speeds(hits, shuttle_xy, players, court, afps)
+    rallies = build_rallies(hits, shuttle_xy, court, afps)
+    for p in players:
+        p.hits = [h for h in hits if h.player == p.pid]
+    log(f"Cầu thấy ở {np.mean(~np.isnan(shuttle_xy[:, 0])) * 100:.0f}% khung · {len(hits)} cú đánh · {len(rallies)} rally")
+
+    # --- Excel
+    xlsx = out_dir / f"{stem}_thong-ke.xlsx"
+    overview, summary = write_excel(xlsx, players, rallies, hits, afps, args.start)
+
+    # --- Lượt 2: xuất video HUD
+    cap.release()
+    out_mp4 = out_dir / f"{stem}_HUD.mp4"
+    workers = max(1, min(8, (os.cpu_count() or 4) // 3))
+    log(f"Xuất video HUD trên {workers} tiến trình song song…")
+    t1 = time.time()
+    with tqdm(total=n, desc="Xuất video", unit="khung") as bar:
+        render_video(out_mp4, video, start_f, step, n, (W, H, players, rallies, hits, shuttle_xy, afps), thumbs,
+                     args.start, (end_f - start_f) / fps, workers, on_progress=bar.update)
+    log(f"Xuất video xong sau {time.time() - t1:.0f}s")
+
+    log(f"Hoàn tất sau {(time.time() - t0) / 60:.1f} phút")
+    print("\n" + overview.to_string(index=False))
+    print("\n" + summary.to_string(index=False))
+    print(f"\nVideo: {out_mp4}\nExcel: {xlsx}")
+
+
+if __name__ == "__main__":
+    main()

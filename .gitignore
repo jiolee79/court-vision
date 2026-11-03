@@ -1,3 +1,13 @@
 *.zip
 __pycache__/
 .claude/settings.local.json
+
+# Video, kết quả phân tích và file tạm — không đưa lên GitHub
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.xlsx
+*.cvcache.pkl
+*.court.json

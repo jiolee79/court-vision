@@ -1,7 +1,46 @@
-# Court Vision – Thống kê cầu lông bằng AI trên điện thoại
+# Court Vision – Thống kê cầu lông bằng AI
+
+Gồm hai phần dùng kết hợp:
+
+| | App điện thoại (`app/`) | Công cụ máy tính (`analyzer/`) |
+|---|---|---|
+| Dùng khi | Xem nhanh ngay tại sân | Muốn kết quả chính xác, video HUD hoàn chỉnh |
+| Quả cầu | Không theo dõi (đếm cú đánh bằng âm thanh) | **TrackNetV3** – AI chuyên theo dõi cầu lông |
+| Người chơi | MediaPipe + màu áo | **YOLO11-pose** (khung xương) + màu áo |
+| Kết quả | HUD trực tiếp, ghi video | Video MP4 có HUD + file Excel thống kê |
+
+## Công cụ máy tính (chính xác nhất)
+
+**Cài đặt (một lần):** bấm đúp `Cai dat.bat`. Thư viện AI (~1.5 GB) được cài vào
+`C:\Users\<bạn>\court-vision-ai` (ngoài Dropbox).
+
+**Dùng:** bấm đúp `Phan tich video.bat`
+1. Chọn video, nhập tên 4 người (gần camera trái/phải, phía xa trái/phải), bấm *Bắt đầu*.
+2. Lần đầu với mỗi video: cửa sổ hiệu chỉnh hiện ra → kéo 4 điểm vào 4 góc sân → **Enter**
+   (phím **Z** thu nhỏ nếu góc sân nằm ngoài khung). Hiệu chỉnh được lưu cạnh video (`.court.json`).
+3. Chờ xử lý. Kết quả nằm **cạnh file video**: `…_HUD.mp4` và `…_thong-ke.xlsx`.
+
+Dòng lệnh: `python analyzer/analyze.py video.mp4 --names "A,B,C,D" [--singles] [--start 60 --end 180] [--quality best]`
+
+**Thời gian xử lý** (CPU Intel i7-12700, không cần card đồ hoạ): khoảng 2–2.5 lần độ dài video
+với video quay dọc (quét cầu 2 ô), nhanh hơn với video quay ngang. Có thể chỉ phân tích một đoạn.
+Lần chạy đầu tiên mất thêm ~1 phút để nén mô hình AI (INT8).
+
+**Excel gồm:** Tổng quan · Người chơi (quãng đường, tốc độ chạy, số cú, cầu nhanh nhất) · Rally
+(thời gian, số cú, người đánh cuối, cầu rơi trong/ngoài – ước tính) · Cú đánh (từng cú, ai đánh, tốc độ).
+
+**Cách tính:** cú đánh = điểm quỹ đạo cầu đổi hướng/tăng tốc đột ngột cạnh một người chơi (khớp
+thời điểm với tiếng vợt nếu có); tốc độ cầu = từ thời gian bay giữa hai người đánh (có tính lực cản)
+kết hợp đo trực tiếp trên ảnh ngay sau cú đánh.
+
+Mô hình: TrackNetV3 (Chen & Wang, NYCU, MIT License) · YOLO11-pose (Ultralytics, AGPL-3.0).
+
+---
+
+## App điện thoại
 
 Web app (PWA) cài được lên màn hình chính iPhone/Android như một app thường. AI chạy ngay trên máy
-(MediaPipe, dùng GPU), không gửi video lên server.
+(MediaPipe, dùng GPU), không gửi video lên server. Link: https://jiolee79.github.io/court-vision/
 
 ## Tính năng
 - **Hiệu chỉnh sân**: kéo 4 điểm vào 4 góc sân, có kính lúp khi kéo. Nút **🔍 Góc ngoài khung** dùng khi một góc sân nằm ngoài khung hình.
