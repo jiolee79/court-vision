@@ -164,22 +164,76 @@ def foot_point(box, kps):
     return np.array([(box[0] + box[2]) / 2, box[3]])
 
 
+def body_height_m(court, foot, box):
+    """Chiều cao người ước tính (m): chiều cao khung chia cho tỉ lệ px/m của mặt sân tại chân, theo
+    hướng vuông góc tầm nhìn (hướng ít bị co ngắn nhất ≈ cùng tỉ lệ với vật thẳng đứng)."""
+    p = court.to_court([foot])[0]
+    q = court.to_image([p, p + (0.25, 0), p + (0, 0.25)])
+    J = np.c_[q[1] - q[0], q[2] - q[0]] / 0.25
+    s = np.linalg.svd(J, compute_uv=False)[0]
+    return (box[3] - box[1]) / s if s > 1e-6 else 0.0
+
+
+def static_cells(pose_dets, court_at, cell=0.5, frac=0.25):
+    """Ô ngoài sân có người đứng gần như suốt video (trọng tài, người xem sát biên) → bỏ qua."""
+    occ, n = {}, 0
+    for f in sorted(pose_dets)[::4]:
+        n += 1
+        ct = court_at(f)
+        seen = set()
+        for box, kps, _ in pose_dets[f]:
+            x, y = ct.to_court([foot_point(box, kps)])[0]
+            if abs(x) < 50 and abs(y) < 50:
+                seen.add((int(np.floor(x / cell)), int(np.floor(y / cell))))
+        for k in seen:
+            occ[k] = occ.get(k, 0) + 1
+    out = set()
+    for (i, j) in occ:
+        x, y = (i + .5) * cell, (j + .5) * cell
+        inside = -0.2 < x < C.W + 0.2 and -0.2 < y < C.L + 0.2
+        if inside:
+            continue
+        tot = sum(occ.get((i + a, j + b), 0) for a in (-1, 0, 1) for b in (-1, 0, 1))
+        if n and tot / n > frac:
+            out.add((i, j))
+    return out, cell
+
+
 class IdentityAssigner:
     """Gán người phát hiện được vào đúng người chơi theo vị trí trên sân (giữ phía sân, gần vị trí cũ)."""
 
-    def __init__(self, court, names, singles, fps):
+    def __init__(self, court, names, singles, fps, frame_size=None, static=None):
         self.court = court
         self.fps = fps
+        self.frame_size = frame_size
+        self.static = static or (set(), 0.5)
+        self.dropped = {"mép ảnh": 0, "chiều cao": 0, "đứng yên ngoài sân": 0, "ngoài sân": 0}
         sides = [0, 1] if singles else [0, 0, 1, 1]
         slots = [0, 0] if singles else [0, 1, 0, 1]
         self.players = [PlayerTrack(i, n, s, sl) for i, (n, s, sl) in enumerate(zip(names, sides, slots))]
 
     def update(self, frame_idx, dets):
         obs = []
+        cells, cell = self.static
         for box, kps, sig in dets:
             foot = foot_point(box, kps)
             pos = self.court.to_court([foot])[0]
             if not (-MARGIN_X <= pos[0] <= C.W + MARGIN_X and -MARGIN_Y <= pos[1] <= C.L + MARGIN_Y):
+                self.dropped["ngoài sân"] += 1
+                continue
+            if self.frame_size and (box[0] < 3 or box[2] > self.frame_size[0] - 3):
+                # Bị mép ảnh cắt mất một phần: chỉ giữ khi thấy rõ cổ chân và đứng trong sân
+                # (người đứng ngoài biên sát mép ảnh thường là trọng tài biên / người xem).
+                ank_ok = (kps[[L_ANKLE, R_ANKLE], 2] > 0.5).any()
+                if not (ank_ok and 0.0 <= pos[0] <= C.W and -0.5 <= pos[1] <= C.L + 1.5):
+                    self.dropped["mép ảnh"] += 1
+                    continue
+            hm = body_height_m(self.court, foot, box)
+            if not 1.0 <= hm <= 2.8:  # quá to/nhỏ so với người đứng ở chỗ đó → người ở chỗ khác hoặc nhận nhầm
+                self.dropped["chiều cao"] += 1
+                continue
+            if (int(np.floor(pos[0] / cell)), int(np.floor(pos[1] / cell))) in cells:
+                self.dropped["đứng yên ngoài sân"] += 1
                 continue
             obs.append(Obs(box, kps, foot, pos, sig))
         if not obs:

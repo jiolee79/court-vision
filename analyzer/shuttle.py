@@ -226,17 +226,22 @@ class ShuttleTracker:
                 self.results[f], self.conf[f] = self._locate([heats[(w, t)][k] for t in range(len(self.tiles))])
         self.pending = []
 
-    def _locate(self, hms):
-        best = (0.0, None)
+    def _locate(self, hms, max_cands=4):
+        """Mọi đốm sáng trên heatmap (tối đa vài cái mạnh nhất): cầu thật có thể không phải đốm mạnh nhất
+        khi có cầu nằm dưới sàn / cầu sân bên — chọn đúng quả sau, dựa vào đường bay liền mạch."""
+        cands = []
         for t, hm in enumerate(hms):
-            peak = float(hm.max())
-            if peak < 0.5 or peak <= best[0]:
+            if float(hm.max()) < 0.5:
                 continue
             mask = (hm > 0.5).astype(np.uint8)
             cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not cnts:
-                continue
-            bx, by, bw, bh = cv2.boundingRect(max(cnts, key=cv2.contourArea))
             tx, ty, tw, th = self.tiles[t]
-            best = (peak, (tx + (bx + bw / 2) * tw / WIDTH, ty + (by + bh / 2) * th / HEIGHT))
-        return best[1], best[0]
+            for c in cnts:
+                bx, by, bw, bh = cv2.boundingRect(c)
+                peak = float(hm[by:by + bh, bx:bx + bw].max())
+                x, y = tx + (bx + bw / 2) * tw / WIDTH, ty + (by + bh / 2) * th / HEIGHT
+                if all(np.hypot(x - u, y - v) > 12 for u, v, _ in cands):  # ô quét chồng nhau → trùng
+                    cands.append((x, y, peak))
+        cands.sort(key=lambda c: -c[2])
+        cands = cands[:max_cands]
+        return cands, (cands[0][2] if cands else 0.0)

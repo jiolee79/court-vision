@@ -20,7 +20,7 @@ from calibrate import calibrate  # noqa: E402
 from court import MovingCourt, load_calibration, save_calibration  # noqa: E402
 from events import (audio_onsets, build_player_series, build_rallies, clean_shuttle,  # noqa: E402
                     detect_hits, estimate_speeds)
-from players import IdentityAssigner, PoseRunner  # noqa: E402
+from players import IdentityAssigner, PoseRunner, static_cells  # noqa: E402
 from render import open_video, render_video, thumb  # noqa: E402
 from report import write_excel  # noqa: E402
 from scenes import camera_segments, track_camera  # noqa: E402
@@ -183,7 +183,7 @@ def main():
 
     # --- Lượt 1: nhận diện (lưu lại để lần sau đổi tên / xuất lại video không phải chạy AI lại)
     cache_file = video.with_suffix(".cvcache.pkl")
-    cache_key = (start_f, end_f, step, args.quality, ref_court.ref, tuple(map(tuple, np.round(ref_court.corners, 1))),
+    cache_key = ("v2", start_f, end_f, step, args.quality, ref_court.ref, tuple(map(tuple, np.round(ref_court.corners, 1))),
                  round(ref_t, 2), len(seg_starts), tuple(tiles))
     cached = None
     if cache_file.exists():
@@ -230,15 +230,20 @@ def main():
     n = max(len(thumbs), max(raw_shuttle, default=0) + 1)
 
     # --- Ghép người, cú đánh, rally
-    ia = IdentityAssigner(courts.at(0), names, args.singles, afps)
+    ia = IdentityAssigner(courts.at(0), names, args.singles, afps, frame_size=(W, H),
+                          static=static_cells(pose_dets, courts.at))
     for a in sorted(pose_dets):
         ia.court = courts.at(a)
         ia.update(a, pose_dets[a])
+    d = ia.dropped
+    log(f"Lọc bỏ người không phải VĐV: {d['ngoài sân']} ngoài sân, {d['mép ảnh']} bị mép ảnh cắt, "
+        f"{d['chiều cao']} sai kích thước, {d['đứng yên ngoài sân']} đứng yên cạnh sân")
     players = [build_player_series(t, n, afps) for t in ia.players]
     shuttle_xy = clean_shuttle(raw_shuttle, n, H)
     hits = detect_hits(shuttle_xy, players, afps, onsets)
     estimate_speeds(hits, shuttle_xy, players, courts, afps)
-    rallies = build_rallies(hits, shuttle_xy, courts, afps)
+    rallies = build_rallies(hits, shuttle_xy, courts, afps, players=players)
+    hits = [h for r in rallies for h in r.hits]  # bỏ cú lẻ ngoài rally (nhiễu)
     for p in players:
         p.hits = [h for h in hits if h.player == p.pid]
     log(f"Cầu thấy ở {np.mean(~np.isnan(shuttle_xy[:, 0])) * 100:.0f}% khung · {len(hits)} cú đánh · {len(rallies)} rally")

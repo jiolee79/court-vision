@@ -1,5 +1,5 @@
 import { COURT } from './court.js';
-import { solveHomography, invertH, applyH } from './homography.js';
+import { solveHomography, invertH, applyH, applyHFront } from './homography.js';
 import { PersonDetector } from './detector.js';
 import { Tracker, colorSignature } from './tracker.js';
 import { AudioHits, RallyEngine } from './hits.js';
@@ -283,8 +283,22 @@ function goHome() {
 }
 
 // ---------------- Hiệu chỉnh sân ----------------
+// Bộ 4 điểm mốc (toạ độ sân, mét). Khi không lùi đủ xa để thấy biên cuối phía gần, dùng chân cột
+// lưới + vạch giao cầu ngắn — 4 điểm này luôn nằm giữa khung hình.
+const REFS = [
+  { id: 'corners', pts: [[0, 0], [COURT.W, 0], [COURT.W, COURT.L], [0, COURT.L]],
+    hint: 'Kéo 4 điểm vào <b>4 góc sân</b>: 1-2 biên cuối phía xa, 3-4 biên cuối phía gần. Lưới hiện màu vàng.' },
+  { id: 'net_short', pts: [[0, COURT.NET], [COURT.W, COURT.NET], [COURT.W, COURT.NET + COURT.SHORT], [0, COURT.NET + COURT.SHORT]],
+    hint: 'Kéo <b>1-2 vào chân 2 cột lưới</b> (trái, phải), <b>3-4 vào 2 đầu vạch giao cầu ngắn phía gần</b> (phải, trái). Dùng khi không thấy biên cuối gần.' },
+  { id: 'net_base', pts: [[0, COURT.NET], [COURT.W, COURT.NET], [COURT.W, COURT.L], [0, COURT.L]],
+    hint: 'Kéo <b>1-2 vào chân 2 cột lưới</b> (trái, phải), <b>3-4 vào 2 góc biên cuối phía gần</b> (phải, trái). Dùng khi không thấy biên cuối xa.' },
+];
+const ZOOMS = [1, 0.5, 0.3, 0.2];
+S.ref = 0;
+
 function defaultCorners() {
   const { W, H } = S;
+  if (S.ref !== 0) return [[W * 0.2, H * 0.45], [W * 0.8, H * 0.45], [W * 0.92, H * 0.62], [W * 0.08, H * 0.62]];
   return [[W * 0.36, H * 0.3], [W * 0.64, H * 0.3], [W * 0.88, H * 0.88], [W * 0.12, H * 0.88]];
 }
 
@@ -292,42 +306,84 @@ function enterCalibration() {
   S.phase = 'calib';
   if (S.mode === 'file') S.video.pause();
   const saved = store.get('corners', null);
+  S.ref = Math.max(0, REFS.findIndex((r) => r.id === store.get('calibRef', 'corners')));
   S.corners = saved ? saved.map(([x, y]) => [x * S.W, y * S.H]) : defaultCorners();
-  setCalibZoom(S.corners.some(([x, y]) => x < 0 || y < 0 || x > S.W || y > S.H));
+  autoZoom();
   updateHomography();
+  $('calibHint').innerHTML = REFS[S.ref].hint;
   $('calibBar').classList.remove('hidden');
   $('liveBar').classList.add('hidden');
 }
 
 function updateHomography() {
-  const dst = [[0, 0], [COURT.W, 0], [COURT.W, COURT.L], [0, COURT.L]];
-  S.Hm = solveHomography(S.corners, dst);
+  S.Hm = solveHomography(S.corners, REFS[S.ref].pts);
   S.Hinv = S.Hm && invertH(S.Hm);
 }
 
+// Đổi bộ điểm mốc nhưng giữ nguyên sân đang vẽ: chiếu điểm mốc mới qua phép chiếu hiện tại.
+$('btnCalibRef').addEventListener('click', () => {
+  const next = (S.ref + 1) % REFS.length;
+  const pts = S.Hinv && REFS[next].pts.map(([x, y]) => applyHFront(S.Hinv, x, y, COURT.W / 2, COURT.NET));
+  const ok = pts && pts.every((p) => p) && pts.every(([x, y]) => Number.isFinite(x) && Number.isFinite(y)
+    && x > -4 * S.W && x < 5 * S.W && y > -3 * S.H && y < 6 * S.H);
+  S.ref = next;
+  S.corners = ok ? pts : defaultCorners();
+  updateHomography();
+  autoZoom();
+  $('calibHint').innerHTML = REFS[S.ref].hint;
+  toast(['Mốc: 4 góc sân', 'Mốc: chân cột lưới + vạch giao cầu ngắn gần', 'Mốc: chân cột lưới + biên cuối gần'][S.ref], 2500);
+});
+
 // Vùng ảnh quanh sân (kèm khoảng ngoài sân và chiều cao người ở phía xa) để đưa vào AI.
 function computeRoi() {
-  const pts = [];
-  for (const [x, y] of [[-1.6, -2.4], [COURT.W + 1.6, -2.4], [COURT.W + 1.6, COURT.L + 2.4], [-1.6, COURT.L + 2.4]]) {
-    pts.push(applyH(S.Hinv, x, y));
+  // Lấy mẫu dọc viền vùng sân (kèm lề); phần nằm sau lưng camera (máy đặt thấp) → tới mép ảnh.
+  const xs = [-1.6, COURT.W + 1.6], ys = [-2.4, COURT.L + 2.4];
+  const fin = [];
+  let behind = false;
+  for (let i = 0; i <= 20; i++) {
+    const t = i / 20;
+    for (const [x, y] of [[xs[0] + (xs[1] - xs[0]) * t, ys[0]], [xs[0] + (xs[1] - xs[0]) * t, ys[1]],
+      [xs[0], ys[0] + (ys[1] - ys[0]) * t], [xs[1], ys[0] + (ys[1] - ys[0]) * t]]) {
+      const p = applyHFront(S.Hinv, x, y, COURT.W / 2, COURT.NET);
+      if (p) fin.push(p); else behind = true;
+    }
   }
-  let x0 = Math.min(...pts.map((p) => p[0])), x1 = Math.max(...pts.map((p) => p[0]));
-  let y0 = Math.min(...pts.map((p) => p[1])), y1 = Math.max(...pts.map((p) => p[1]));
-  const farW = Math.hypot(S.corners[1][0] - S.corners[0][0], S.corners[1][1] - S.corners[0][1]);
+  if (!fin.length) return [0, 0, S.W, S.H];
+  let x0 = Math.min(...fin.map((p) => p[0])), x1 = Math.max(...fin.map((p) => p[0]));
+  let y0 = Math.min(...fin.map((p) => p[1])), y1 = Math.max(...fin.map((p) => p[1]));
+  if (behind) { x0 = 0; x1 = S.W; y1 = S.H; }
+  const a = applyH(S.Hinv, 0, 0), b = applyH(S.Hinv, COURT.W, 0);
+  const farW = Math.hypot(b[0] - a[0], b[1] - a[1]);
   y0 -= (farW / COURT.W) * 2.2; // người đứng ở biên xa cao ~2m
   x0 = Math.max(0, x0); y0 = Math.max(0, y0);
   x1 = Math.min(S.W, x1); y1 = Math.min(S.H, y1);
-  return [x0, y0, Math.max(16, x1 - x0), Math.max(16, y1 - y0)];
+  if (!(x1 - x0 > 16 && y1 - y0 > 16)) return [0, 0, S.W, S.H];
+  return [x0, y0, x1 - x0, y1 - y0];
 }
 
-// Khi hiệu chỉnh có thể thu nhỏ khung hình để đặt điểm cho góc sân nằm ngoài video.
+// Khi hiệu chỉnh có thể thu nhỏ khung hình (tới 1/5) để đặt điểm nằm ngoài video — khi không lùi
+// đủ xa để quay hết sân. Video được đặt lệch lên trên vì phần sân bị khuất thường ở phía dưới.
 S.view = { k: 1, ox: 0, oy: 0 };
-function setCalibZoom(out) {
-  const k = out ? 0.5 : 1;
-  S.view = { k, ox: (S.W * (1 - k)) / 2, oy: (S.H * (1 - k)) / 2 };
-  $('btnCalibZoom').classList.toggle('on', out);
+function setCalibZoom(k) {
+  S.view = { k, ox: (S.W * (1 - k)) / 2, oy: S.H * (1 - k) * 0.25 };
+  $('btnCalibZoom').classList.toggle('on', k < 1);
+  $('btnCalibZoom').textContent = k < 1 ? `🔍 Thu nhỏ ${Math.round(1 / k * 10) / 10}×` : '🔍 Thu nhỏ';
 }
-$('btnCalibZoom').addEventListener('click', () => setCalibZoom(S.view.k === 1));
+// Mức thu nhỏ vừa đủ để thấy cả 4 điểm.
+function autoZoom() {
+  const { W, H } = S;
+  for (const k of ZOOMS) {
+    const ox = (W * (1 - k)) / 2, oy = H * (1 - k) * 0.25;
+    if (S.corners.every(([x, y]) => x * k + ox > 0 && x * k + ox < W && y * k + oy > 0 && y * k + oy < H)) {
+      setCalibZoom(k);
+      return;
+    }
+  }
+  setCalibZoom(ZOOMS[ZOOMS.length - 1]);
+}
+$('btnCalibZoom').addEventListener('click', () => {
+  setCalibZoom(ZOOMS[(ZOOMS.indexOf(S.view.k) + 1) % ZOOMS.length]);
+});
 
 let drag = null;
 // Toạ độ chạm → toạ độ ảnh video (đã tính phần thu nhỏ khi hiệu chỉnh).
@@ -352,8 +408,8 @@ S.canvas.addEventListener('pointermove', (e) => {
   const [x, y] = toCanvas(e);
   // Kéo tương đối để ngón tay không che điểm đang chỉnh.
   S.corners[drag.i] = [
-    Math.min(S.W * 1.5, Math.max(-S.W * 0.5, drag.ox + (x - drag.sx))),
-    Math.min(S.H * 1.5, Math.max(-S.H * 0.5, drag.oy + (y - drag.sy))),
+    Math.min(S.W * 3.5, Math.max(-S.W * 2.5, drag.ox + (x - drag.sx))),
+    Math.min(S.H * 4.5, Math.max(-S.H * 1.5, drag.oy + (y - drag.sy))),
   ];
   updateHomography();
 });
@@ -361,13 +417,14 @@ const endDrag = () => { drag = null; };
 S.canvas.addEventListener('pointerup', endDrag);
 S.canvas.addEventListener('pointercancel', endDrag);
 
-$('btnCalibReset').addEventListener('click', () => { S.corners = defaultCorners(); updateHomography(); });
+$('btnCalibReset').addEventListener('click', () => { S.corners = defaultCorners(); updateHomography(); autoZoom(); });
 $('btnCalibDone').addEventListener('click', async () => {
   if (!S.Hm || !S.Hinv) { toast('4 điểm chưa hợp lệ, hãy kéo lại'); return; }
   store.set('corners', S.corners.map(([x, y]) => [x / S.W, y / S.H]));
-  S.tracker.setHomography(S.Hm);
+  store.set('calibRef', REFS[S.ref].id);
+  S.tracker.setHomography(S.Hm, S.Hinv, S.W);
   S.roi = computeRoi();
-  setCalibZoom(false);
+  setCalibZoom(1);
   $('calibBar').classList.add('hidden');
   loading('Đang tải mô hình AI… (lần đầu cần mạng, khoảng 10–30 giây)');
   const ok = await S.detectorReady;

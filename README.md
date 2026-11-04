@@ -40,6 +40,12 @@ Quick Sync, xuất video trên nhiều tiến trình song song. Lần chạy đ�
 **Excel gồm:** Tổng quan · Người chơi (quãng đường, tốc độ chạy, số cú, cầu nhanh nhất) · Rally
 (thời gian, số cú, người đánh cuối, cầu rơi trong/ngoài – ước tính) · Cú đánh (từng cú, ai đánh, tốc độ).
 
+**Lọc nhiễu (sân đông người):** chỉ nhận người có chân nằm trong sân (lề 1 m hai bên, 2.6 m sau biên cuối),
+bỏ người bị mép ảnh cắt mà đứng ngoài biên, người có kích thước không khớp với vị trí (người ở sân bên/khán đài
+bị chiếu nhầm vào sân), và người đứng yên một chỗ ngoài sân gần như suốt video (trọng tài, người xem).
+Quả cầu: AI giữ vài ứng viên mỗi khung, ghép thành các đường bay liền mạch rồi bỏ cầu nằm yên dưới sàn / cầm
+trên tay và các vệt chập chờn (cầu sân bên). Rally chỉ 1 cú (nhặt cầu, đánh trả cầu) không tính.
+
 **Cách tính:** cú đánh = điểm quỹ đạo cầu đổi hướng/tăng tốc đột ngột (kể cả khi cầu bị che vài khung
 đúng lúc chạm vợt) cạnh một người chơi; bên đánh được chọn cho cả rally theo luật luân phiên (Viterbi),
 khoảng cách cầu–cổ tay tính theo tỷ lệ chiều cao người để người đứng gần camera không "hút" cú đánh của
@@ -61,7 +67,12 @@ Web app (PWA) cài được lên màn hình chính iPhone/Android như một app
 (MediaPipe, dùng GPU), không gửi video lên server. Link: https://jiolee79.github.io/court-vision/
 
 ## Tính năng
-- **Hiệu chỉnh sân**: kéo 4 điểm vào 4 góc sân, có kính lúp khi kéo. Nút **🔍 Góc ngoài khung** dùng khi một góc sân nằm ngoài khung hình.
+- **Hiệu chỉnh sân**: kéo 4 điểm mốc, có kính lúp khi kéo.
+  - **📍 Đổi điểm mốc**: *4 góc sân*, *chân 2 cột lưới + 2 đầu vạch giao cầu ngắn phía gần* (khi không lùi
+    đủ xa để thấy biên cuối gần — 4 điểm này luôn nằm giữa khung hình), hoặc *chân cột lưới + biên cuối gần*.
+    Khi đổi, sân đang vẽ được giữ nguyên, chỉ cần tinh chỉnh.
+  - **🔍 Thu nhỏ** (2× / 3.3× / 5×): kéo điểm ra ngoài video khi góc sân bị khuất. Video được đặt lệch lên trên
+    để chừa nhiều chỗ phía dưới (biên cuối gần thường bị khuất ở đó).
 - **Nhận diện & theo dõi 4 người** (hoặc 2 khi đánh đơn): tên nổi trên đầu, vòng sáng dưới chân, bản đồ sân nhìn từ trên xuống kèm đường di chuyển.
 - **Quãng đường (MOVE)** tính bằng mét thật trên sân, **thể lực (STAMINA)** giảm khi chạy/bứt tốc và hồi khi đứng nghỉ.
 - **Đếm cú đánh tự động** bằng tiếng "bốp" của cầu (micro / âm thanh video), có lọc theo chuyển động vung vợt để bỏ tiếng sân bên cạnh. Có thể chuyển sang **bấm tay**.

@@ -1,6 +1,6 @@
 // Vẽ lớp HUD kiểu truyền hình lên canvas (nằm trong video khi ghi hình).
 import { COURT, courtLines } from './court.js';
-import { applyH } from './homography.js';
+import { applyHFront } from './homography.js';
 
 const FONT = '-apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 const PANEL = 'rgba(8, 18, 28, 0.74)';
@@ -202,17 +202,23 @@ function drawPlayerTags(ctx, tracker, rally, now, s) {
 }
 
 // Vẽ các đường sân đã hiệu chỉnh lên khung hình (để kiểm tra độ khớp).
-export function drawCourtOverlay(ctx, Hinv, s, alpha = 0.8) {
+export function drawCourtOverlay(ctx, Hinv, s, alpha = 0.8, ref = [COURT.W / 2, COURT.NET]) {
+  // Chia mỗi đường thành nhiều đoạn nhỏ, bỏ phần nằm sau lưng camera.
+  const path = (x1, y1, x2, y2) => {
+    let prev = null;
+    for (let i = 0; i <= 24; i++) {
+      const t = i / 24;
+      const p = applyHFront(Hinv, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, ref[0], ref[1]);
+      if (p && prev) { ctx.moveTo(prev[0], prev[1]); ctx.lineTo(p[0], p[1]); }
+      prev = p && Math.abs(p[0]) < 1e5 && Math.abs(p[1]) < 1e5 ? p : null;
+    }
+  };
   ctx.strokeStyle = `rgba(63, 208, 255, ${alpha})`;
   ctx.lineWidth = 2 * s;
   ctx.beginPath();
-  for (const [x1, y1, x2, y2] of courtLines()) {
-    const a = applyH(Hinv, x1, y1), b = applyH(Hinv, x2, y2);
-    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
-  }
+  for (const [x1, y1, x2, y2] of courtLines()) path(x1, y1, x2, y2);
   ctx.stroke();
-  const n1 = applyH(Hinv, 0, COURT.NET), n2 = applyH(Hinv, COURT.W, COURT.NET);
   ctx.strokeStyle = `rgba(255, 210, 63, ${alpha})`;
   ctx.lineWidth = 3 * s;
-  ctx.beginPath(); ctx.moveTo(n1[0], n1[1]); ctx.lineTo(n2[0], n2[1]); ctx.stroke();
+  ctx.beginPath(); path(0, COURT.NET, COURT.W, COURT.NET); ctx.stroke();
 }

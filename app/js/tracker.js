@@ -6,7 +6,7 @@ export const PLAYER_COLORS = ['#4fc3f7', '#7ee081', '#c792ea', '#ffb74d'];
 
 const MISS_COST = 2.6;
 const MAX_RUN_SPEED = 9; // m/s — bước nhảy lớn hơn coi như nhận diện nhầm
-const COURT_MARGIN_X = 1.6;
+const COURT_MARGIN_X = 1.0;
 const COURT_MARGIN_Y = 2.6;
 
 // Độ giống nhau của hai histogram màu (hệ số Bhattacharyya, 0..1).
@@ -83,8 +83,21 @@ export class Tracker {
     this.lastT = null;
   }
 
-  setHomography(H) {
+  // H: ảnh → sân; Hinv: sân → ảnh; frameW: độ rộng khung (để biết người bị mép ảnh cắt).
+  setHomography(H, Hinv = null, frameW = 0) {
     this.H = H;
+    this.Hinv = Hinv;
+    this.frameW = frameW;
+  }
+
+  // Chiều cao người ước tính (m) = chiều cao khung / tỉ lệ px-mét của mặt sân tại chân.
+  heightM(d, cx, cy) {
+    if (!this.Hinv) return 1.7;
+    const o = applyH(this.Hinv, cx, cy), a = applyH(this.Hinv, cx + 0.25, cy), b = applyH(this.Hinv, cx, cy + 0.25);
+    const j = [(a[0] - o[0]) * 4, (b[0] - o[0]) * 4, (a[1] - o[1]) * 4, (b[1] - o[1]) * 4];
+    const p = j[0] * j[0] + j[2] * j[2], q = j[1] * j[1] + j[3] * j[3], r = j[0] * j[1] + j[2] * j[3];
+    const s = Math.sqrt((p + q) / 2 + Math.sqrt(((p - q) / 2) ** 2 + r * r)); // giá trị kỳ dị lớn nhất
+    return s > 1e-6 ? d.h / s : 1.7;
   }
 
   // dets: bbox người trong toạ độ khung hình; t: giây.
@@ -95,6 +108,12 @@ export class Tracker {
       const [cx, cy] = applyH(this.H, d.x + d.w / 2, d.y + d.h);
       if (cx < -COURT_MARGIN_X || cx > COURT.W + COURT_MARGIN_X) continue;
       if (cy < -COURT_MARGIN_Y || cy > COURT.L + COURT_MARGIN_Y) continue;
+      // Bị mép ảnh cắt và đứng ngoài biên → thường là trọng tài biên / người xem.
+      const cut = this.frameW && (d.x < 3 || d.x + d.w > this.frameW - 3);
+      if (cut && (cx < 0 || cx > COURT.W)) continue;
+      // Quá to/nhỏ so với một người đứng ở chỗ đó → người ở chỗ khác (sân bên, khán đài) hoặc nhận nhầm.
+      const hm = this.heightM(d, cx, cy);
+      if (hm < 0.9 || hm > 3.0) continue;
       cand.push({ ...d, cx, cy });
     }
 

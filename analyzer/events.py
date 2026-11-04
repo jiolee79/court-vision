@@ -10,45 +10,69 @@ SHUTTLE_K = 9.81 / (6.7 * 6.7)  # lực cản cầu lông: vận tốc rơi tớ
 
 
 # ---------------------------------------------------------------- quả cầu
+def _as_cands(v):
+    """Kết quả mỗi khung: bản cũ là (x, y) hoặc None, bản mới là danh sách (x, y, độ tin)."""
+    if v is None:
+        return []
+    if len(v) and np.ndim(v[0]) == 0:
+        return [(float(v[0]), float(v[1]))]
+    return [(float(c[0]), float(c[1])) for c in v]
+
+
 def clean_shuttle(raw, n_frames, frame_h):
-    """raw: {frame: (x, y) | None} → mảng (N, 2) đã lọc nhiễu, NaN = không thấy."""
+    """raw: {frame: ứng viên} → mảng (N, 2) đã lọc nhiễu, NaN = không thấy.
+
+    Ghép các ứng viên thành từng đoạn bay liền mạch; bỏ đoạn đứng yên / trôi chậm (cầu nằm dưới sàn,
+    cầm trên tay, đèn), đoạn quá ngắn (nhận nhầm chập chờn); mỗi khung giữ điểm thuộc đoạn dài nhất.
+    """
+    thr = 0.09 * frame_h  # bước nhảy tối đa mỗi khung
+    pts = [(f, x, y) for f in sorted(raw) if f < n_frames for x, y in _as_cands(raw[f])]
+    segs = []      # mỗi đoạn: list (frame, x, y)
+    alive = []
+    for f, x, y in pts:
+        alive = [sg for sg in alive if f - sg[-1][0] <= 4]
+        best, bd = None, None
+        for sg in alive:
+            g = f - sg[-1][0]
+            if g <= 0:
+                continue
+            d = np.hypot(x - sg[-1][1], y - sg[-1][2])
+            if d <= thr * g and (bd is None or d < bd):
+                best, bd = sg, d
+        if best is None:
+            best = [(f, x, y)]
+            segs.append(best)
+            alive.append(best)
+        else:
+            best.append((f, x, y))
+
     p = np.full((n_frames, 2), np.nan)
-    for f, v in raw.items():
-        if v is not None and f < n_frames:
-            p[f] = v
-    valid = ~np.isnan(p[:, 0])
+    owner = np.zeros(n_frames)
+    for sg in segs:
+        q = np.array([(x, y) for _, x, y in sg])
+        span = sg[-1][0] - sg[0][0] + 1
+        extent = np.hypot(*(q.max(0) - q.min(0)))
+        # Quãng di chuyển thật (bỏ rung nhẹ): cầu đang bay đi vài chục px trong vài khung.
+        if len(sg) < 4 or extent < 0.012 * frame_h or (span >= 10 and extent < 1.2 * span):
+            continue
+        # Đoạn dài có những khúc đứng yên lâu (cầu rơi xuống sàn rồi nằm đó) → cắt bỏ khúc đó.
+        keep = np.ones(len(sg), bool)
+        r0 = 0
+        for k in range(1, len(sg) + 1):
+            if k == len(sg) or np.hypot(*(q[k] - q[r0])) > 4:
+                if sg[k - 1][0] - sg[r0][0] >= 10:
+                    keep[r0:k] = False
+                r0 = k
+        score = int(keep.sum())
+        for (f, x, y), kp in zip(sg, keep):
+            if kp and score > owner[f]:
+                p[f] = (x, y)
+                owner[f] = score
 
-    # 1) Điểm đứng yên lâu (chữ/logo trên video, cầu nằm dưới sàn) → bỏ.
-    idx = np.flatnonzero(valid)
-    run_start = 0
-    for k in range(1, len(idx) + 1):
-        moving = k < len(idx) and np.hypot(*(p[idx[k]] - p[idx[run_start]])) > 4
-        if k == len(idx) or moving:
-            if idx[k - 1] - idx[run_start] >= 12:
-                p[idx[run_start]:idx[k - 1] + 1] = np.nan
-            run_start = k
-    valid = ~np.isnan(p[:, 0])
-
-    # 2) Điểm nhảy xa bất thường so với cả trước lẫn sau → nhận nhầm.
-    thr = 0.09 * frame_h
-    idx = np.flatnonzero(valid)
-    for a, b, c in zip(idx[:-2], idx[1:-1], idx[2:]):
-        if b - a <= 3 and c - b <= 3:
-            if np.hypot(*(p[b] - p[a])) > thr * (b - a) and np.hypot(*(p[c] - p[b])) > thr * (c - b):
-                p[b] = np.nan
-    # Điểm lẻ loi (không có hàng xóm trong 4 khung) cũng bỏ.
-    valid = ~np.isnan(p[:, 0])
-    idx = np.flatnonzero(valid)
-    for k, i in enumerate(idx):
-        near = (k > 0 and i - idx[k - 1] <= 4) or (k + 1 < len(idx) and idx[k + 1] - i <= 4)
-        if not near:
-            p[i] = np.nan
-
-    # 3) Lấp khoảng trống ngắn (≤ 4 khung) bằng nội suy.
-    valid = ~np.isnan(p[:, 0])
-    idx = np.flatnonzero(valid)
+    # Lấp khoảng trống ngắn (≤ 4 khung) bằng nội suy, không nối hai vật khác nhau.
+    idx = np.flatnonzero(~np.isnan(p[:, 0]))
     for a, b in zip(idx[:-1], idx[1:]):
-        if 1 < b - a <= 5:
+        if 1 < b - a <= 5 and np.hypot(*(p[b] - p[a])) <= thr * (b - a):
             t = np.linspace(0, 1, b - a + 1)[1:-1, None]
             p[a + 1:b] = p[a] * (1 - t) + p[b] * t
     return p
@@ -345,15 +369,25 @@ def estimate_speeds(hits, shuttle, players, courts, fps):
             h.speed_kmh = float(np.clip(v * 3.6, 15, 320))
 
 
-def build_rallies(hits, shuttle, courts, fps, gap_s=3.0):
+def build_rallies(hits, shuttle, courts, fps, gap_s=3.0, players=None):
+    # Người chơi vẫn chạy mạnh trong khoảng trống → vẫn đang đánh, chỉ là mất dấu quả cầu vài giây.
+    spd = np.nan_to_num(np.array([p.speed for p in players])) if players else None
+
+    def still_playing(a, b):
+        if spd is None or (b - a) / fps > 5.0:
+            return False
+        return float(np.mean(spd[:, a:b].max(0) > 2.0)) >= 0.3
+
     rallies, cur = [], []
     for h in hits:
-        if cur and (h.frame - cur[-1].frame) / fps > gap_s:
+        if cur and (h.frame - cur[-1].frame) / fps > gap_s and not still_playing(cur[-1].frame, h.frame):
             rallies.append(cur)
             cur = []
         cur.append(h)
     if cur:
         rallies.append(cur)
+    # "Rally" chỉ 1 cú thường là nhiễu (nhặt cầu, đánh trả cầu cho sân bên) → bỏ.
+    rallies = [hs for hs in rallies if len(hs) >= 2]
     out = []
     n = len(shuttle)
     for hs in rallies:

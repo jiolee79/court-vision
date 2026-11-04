@@ -37,6 +37,15 @@ export function applyH(H, x, y) {
   return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w];
 }
 
+// Như applyH nhưng trả về null nếu điểm nằm sau lưng camera (máy đặt thấp, sát sân).
+// (rx, ry): một điểm chắc chắn nhìn thấy (ví dụ giữa lưới) để biết dấu "phía trước".
+export function applyHFront(H, x, y, rx, ry) {
+  const w = H[6] * x + H[7] * y + H[8];
+  const w0 = H[6] * rx + H[7] * ry + H[8];
+  if (w * w0 <= 0 || Math.abs(w) < Math.abs(w0) * 0.02) return null;
+  return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w];
+}
+
 export function invertH(m) {
   const [a, b, c, d, e, f, g, h, i] = m;
   const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
