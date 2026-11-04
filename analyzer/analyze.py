@@ -17,14 +17,15 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent))
 
 from calibrate import calibrate  # noqa: E402
-from court import Court  # noqa: E402
+from court import MovingCourt, load_calibration, save_calibration  # noqa: E402
 from events import (audio_onsets, build_player_series, build_rallies, clean_shuttle,  # noqa: E402
                     detect_hits, estimate_speeds)
 from players import IdentityAssigner, PoseRunner  # noqa: E402
 from render import open_video, render_video, thumb  # noqa: E402
 from report import write_excel  # noqa: E402
-from shuttle import (ShuttleTracker, TrackNetRunner, calibration_samples, ensure_int8,  # noqa: E402
-                     median_background, plan_tiles, sample_frames)
+from scenes import camera_segments, track_camera  # noqa: E402
+from shuttle import (SKY_M, ShuttleTracker, TrackNetRunner, calibration_samples, ensure_int8,  # noqa: E402
+                     median_background, sample_frames, segment_frames, tiles_for_rect)
 
 
 def log(msg):
@@ -118,17 +119,22 @@ def main():
 
     # --- Hiệu chỉnh sân (lưu cạnh video để lần sau dùng lại)
     court_file = video.with_suffix(".court.json")
-    court = None
+    dur_s = (end_f - start_f) / fps
+
+    def frame_at(t):
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ok, f = cap.read()
+        return f if ok else np.zeros((H, W, 3), np.uint8)
+
     if court_file.exists() and not args.recalibrate:
-        court = Court.load(court_file, W, H)
+        ref_court, ref_t = load_calibration(court_file, W, H)
         log(f"Dùng hiệu chỉnh sân đã lưu: {court_file.name}")
     else:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, min(total - 1, start_f + int(fps)))
-        ok, frame0 = cap.read()
-        court = calibrate(frame0)
-        if court is None:
+        res = calibrate(frame_at, args.start + min(5.0, dur_s / 2), total / fps)
+        if res is None:
             sys.exit("Đã huỷ hiệu chỉnh sân.")
-        court.save(court_file, W, H)
+        ref_court, ref_t = res
+        save_calibration(court_file, ref_court, ref_t, W, H)
 
     names = [s.strip() for s in args.names.split(",") if s.strip()]
     need = 2 if args.singles else 4
@@ -136,24 +142,49 @@ def main():
     names = (names + defaults[len(names):need])[:need] if not args.singles else \
         (names + ["Người 1", "Người 3"][len(names):])[:2]
 
-    # --- Chuẩn bị mô hình
+    # --- Máy quay có bị xê dịch không? Có thì bám theo chuyển động máy để dời sân theo từng khung.
     t0 = time.time()
-    tiles = plan_tiles(court, W, H)
-    roi = court.roi(W, H)
+    seg_starts = camera_segments(video, W, H, start_s=args.start, dur_s=dur_s)
+    if len(seg_starts) > 1:
+        log(f"Máy quay xê dịch {len(seg_starts) - 1} lần → đo chuyển động máy để dời sân theo…")
+        times, Gs, conf = track_camera(video, W, H, ref_t, args.start, dur_s)
+        courts = MovingCourt(ref_court, times, Gs, conf, afps)
+        bad = float(np.mean(np.asarray(conf) < 0.15))
+        if bad > 0.05:
+            log(f"Lưu ý: {bad * 100:.0f}% thời lượng không bám được máy quay (rung mạnh/bị che) — số liệu đoạn đó kém chính xác")
+    else:
+        courts = MovingCourt.fixed(ref_court, afps)
+
+    # Vùng quét: gộp vùng sân ở mọi vị trí máy đã đứng.
+    def union(rs):
+        x0, y0 = min(r[0] for r in rs), min(r[1] for r in rs)
+        return x0, y0, max(r[0] + r[2] for r in rs) - x0, max(r[1] + r[3] for r in rs) - y0
+
+    sample_idx = range(0, n, max(1, int(afps * 2)))
+    tiles = tiles_for_rect(union([courts.at(a).roi(W, H, margin_m=(1.0, 2.0), head_m=SKY_M) for a in sample_idx]), W, H)
+    roi = union([courts.at(a).roi(W, H) for a in sample_idx])
     log(f"Chuẩn bị AI ({len(tiles)} ô quét cầu)…")
     samples = sample_frames(video, W, H, total / fps)
-    medians = median_background(samples, tiles)
+    # Ảnh nền riêng cho từng đoạn máy đứng yên một chỗ.
+    seg_bounds = [int(s * afps) for s in seg_starts] + [n]
+    seg_medians = []
+    for k in range(len(seg_starts)):
+        seg_len = max(1.0, (seg_bounds[k + 1] - seg_bounds[k]) / afps)
+        fr = segment_frames(video, W, H, args.start + seg_starts[k], seg_len) or samples
+        seg_medians.append(median_background(fr, tiles))
+    medians = seg_medians[0]
     ensure_int8(lambda: calibration_samples(video, tiles, medians))
     tracknet = TrackNetRunner(int8=True)
     pose = PoseRunner(roi, size="s" if args.quality == "best" else "n", imgsz=960, int8_calib_frames=samples[:40])
     log(f"Cầu: TrackNetV3 {tracknet.desc} · Người: {pose.desc}")
 
-    pcm, sr = read_audio(video, args.start, (end_f - start_f) / fps)
+    pcm, sr = read_audio(video, args.start, dur_s)
     onsets = audio_onsets(pcm, sr)
 
     # --- Lượt 1: nhận diện (lưu lại để lần sau đổi tên / xuất lại video không phải chạy AI lại)
     cache_file = video.with_suffix(".cvcache.pkl")
-    cache_key = (start_f, end_f, step, args.quality, tuple(map(tuple, np.round(court.corners, 1))))
+    cache_key = (start_f, end_f, step, args.quality, ref_court.ref, tuple(map(tuple, np.round(ref_court.corners, 1))),
+                 round(ref_t, 2), len(seg_starts), tuple(tiles))
     cached = None
     if cache_file.exists():
         try:
@@ -176,7 +207,11 @@ def main():
         pose_every = 2 if args.quality == "fast" else 1
         pose_dets = {}
         thumbs = []
+        seg = 0
         for a, frame in enumerate(tqdm(frames(cap, start_f, end_f, step), total=n, desc="Nhận diện", unit="khung")):
+            while seg + 1 < len(seg_starts) and a >= seg_bounds[seg + 1]:
+                seg += 1
+                shuttle.set_medians(seg_medians[seg])  # máy sang vị trí mới → ảnh nền mới
             if active[min(a, n - 1)]:
                 shuttle.push(a, frame)
             else:
@@ -195,14 +230,15 @@ def main():
     n = max(len(thumbs), max(raw_shuttle, default=0) + 1)
 
     # --- Ghép người, cú đánh, rally
-    ia = IdentityAssigner(court, names, args.singles, afps)
+    ia = IdentityAssigner(courts.at(0), names, args.singles, afps)
     for a in sorted(pose_dets):
+        ia.court = courts.at(a)
         ia.update(a, pose_dets[a])
     players = [build_player_series(t, n, afps) for t in ia.players]
     shuttle_xy = clean_shuttle(raw_shuttle, n, H)
-    hits =detect_hits(shuttle_xy, players, afps, onsets)
-    estimate_speeds(hits, shuttle_xy, players, court, afps)
-    rallies = build_rallies(hits, shuttle_xy, court, afps)
+    hits = detect_hits(shuttle_xy, players, afps, onsets)
+    estimate_speeds(hits, shuttle_xy, players, courts, afps)
+    rallies = build_rallies(hits, shuttle_xy, courts, afps)
     for p in players:
         p.hits = [h for h in hits if h.player == p.pid]
     log(f"Cầu thấy ở {np.mean(~np.isnan(shuttle_xy[:, 0])) * 100:.0f}% khung · {len(hits)} cú đánh · {len(rallies)} rally")

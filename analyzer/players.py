@@ -13,7 +13,7 @@ from paths import MODELS_DIR
 # Chỉ số khung xương COCO
 L_SHOULDER, R_SHOULDER = 5, 6
 L_WRIST, R_WRIST, L_HIP, R_HIP, L_ANKLE, R_ANKLE = 9, 10, 11, 12, 15, 16
-MARGIN_X, MARGIN_Y = 1.6, 2.6
+MARGIN_X, MARGIN_Y = 1.0, 2.6  # ngoài biên dọc > 1 m thường là trọng tài/khán giả
 THUMB = 0.25  # tỉ lệ ảnh thu nhỏ dùng lấy màu áo
 
 

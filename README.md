@@ -16,8 +16,13 @@ Gồm hai phần dùng kết hợp:
 
 **Dùng:** bấm đúp `Phan tich video.bat`
 1. Chọn video, nhập tên 4 người (gần camera trái/phải, phía xa trái/phải), bấm *Bắt đầu*.
-2. Lần đầu với mỗi video: cửa sổ hiệu chỉnh hiện ra → kéo 4 điểm vào 4 góc sân → **Enter**
-   (phím **Z** thu nhỏ nếu góc sân nằm ngoài khung). Hiệu chỉnh được lưu cạnh video (`.court.json`).
+2. Lần đầu với mỗi video: cửa sổ hiệu chỉnh hiện ra → kéo 4 điểm mốc vào đúng chỗ → **Enter**.
+   - **A / D**: lùi/tiến 5 giây để chọn khung nhìn rõ vạch sân nhất.
+   - **M**: đổi bộ điểm mốc — *4 góc sân*, *2 chân cột lưới + 2 đầu vạch giao cầu ngắn phía gần*,
+     hoặc *2 chân cột lưới + 2 góc biên cuối phía gần* (dùng khi biên cuối nằm ngoài khung).
+   - **Z**: thu nhỏ để đặt điểm nằm ngoài khung hình.
+   - Chỉ cần hiệu chỉnh **một lần** kể cả khi máy quay bị xê dịch giữa chừng: công cụ tự đo chuyển động
+     máy (dựa vào trần/tường) và dời sân theo. Hiệu chỉnh được lưu cạnh video (`.court.json`).
 3. Chờ xử lý. Kết quả nằm **cạnh file video**: `…_HUD.mp4` và `…_thong-ke.xlsx`.
 
 Dòng lệnh: `python analyzer/analyze.py video.mp4 --names "A,B,C,D" [--singles] [--start 60 --end 180] [--quality best]`
@@ -35,9 +40,16 @@ Quick Sync, xuất video trên nhiều tiến trình song song. Lần chạy đ�
 **Excel gồm:** Tổng quan · Người chơi (quãng đường, tốc độ chạy, số cú, cầu nhanh nhất) · Rally
 (thời gian, số cú, người đánh cuối, cầu rơi trong/ngoài – ước tính) · Cú đánh (từng cú, ai đánh, tốc độ).
 
-**Cách tính:** cú đánh = điểm quỹ đạo cầu đổi hướng/tăng tốc đột ngột cạnh một người chơi (khớp
-thời điểm với tiếng vợt nếu có); tốc độ cầu = từ thời gian bay giữa hai người đánh (có tính lực cản)
-kết hợp đo trực tiếp trên ảnh ngay sau cú đánh.
+**Cách tính:** cú đánh = điểm quỹ đạo cầu đổi hướng/tăng tốc đột ngột (kể cả khi cầu bị che vài khung
+đúng lúc chạm vợt) cạnh một người chơi; bên đánh được chọn cho cả rally theo luật luân phiên (Viterbi),
+khoảng cách cầu–cổ tay tính theo tỷ lệ chiều cao người để người đứng gần camera không "hút" cú đánh của
+người phía xa. Tốc độ cầu = từ thời gian bay giữa hai người đánh (có tính lực cản) kết hợp đo trực tiếp
+trên ảnh ngay sau cú đánh.
+
+**Cách quay để số liệu chính xác nhất:** đặt điện thoại trên chân máy **cao 1.5–2.5 m**, **phía sau biên
+cuối** (giữa sân), thấy được cả 4 góc sân, và **không chạm vào máy** trong lúc quay. Quay ngang nếu được.
+Đặt máy sát sàn/cạnh lưới vẫn chạy được nhưng nửa sân xa bị ép rất mỏng (1 m chỉ còn vài chục pixel)
+→ quãng đường và tốc độ của người phía xa kém chính xác.
 
 Mô hình: TrackNetV3 (Chen & Wang, NYCU, MIT License) · YOLO11-pose (Ultralytics, AGPL-3.0).
 

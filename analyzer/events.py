@@ -102,11 +102,24 @@ def build_player_series(track, n_frames, fps):
 
 def _motion_stats(s, fps):
     n = len(s.pos)
+    # Làm mượt thêm ~0.6 s rồi chỉ cộng quãng đường theo từng bước 0.4 s: rung chân vài pixel
+    # (ở nửa sân xa, 1 pixel có thể là 4–5 cm) không bị cộng dồn thành quãng đường ảo.
+    win = max(1, int(fps * 0.6)) | 1
+    pos = s.pos.copy()
+    for d in range(2):
+        col = pos[:, d]
+        ok = ~np.isnan(col)
+        if ok.sum() > win:
+            num = np.convolve(np.where(ok, col, 0), np.ones(win), "same")
+            den = np.convolve(ok.astype(float), np.ones(win), "same")
+            pos[:, d] = np.where(ok, num / np.maximum(den, 1), np.nan)
+    stride = max(1, int(fps * 0.4))
     step = np.zeros(n)
-    d = np.diff(s.pos, axis=0)
-    ln = np.hypot(d[:, 0], d[:, 1])
-    ok = ~np.isnan(ln) & (ln * fps < 9.0)          # bỏ bước nhảy > 9 m/s (nhận nhầm)
-    step[1:][ok] = ln[ok]
+    idx = np.arange(0, n, stride)
+    seg = np.hypot(*np.diff(pos[idx], axis=0).T)
+    ok = ~np.isnan(seg) & (seg / (stride / fps) < 8.0)  # bỏ bước nhảy > 8 m/s (nhận nhầm)
+    for k in np.flatnonzero(ok):
+        step[idx[k] + 1:idx[k + 1] + 1] = seg[k] / stride  # rải đều trong khoảng để HUD tăng mượt
     s.dist = np.cumsum(step)
     # Tốc độ: trung bình trượt 0.3 s
     win = max(1, int(fps * 0.3))
@@ -189,50 +202,115 @@ def detect_hits(shuttle, players, fps, onsets=None):
         score = angle / 45 + max(0, accel - 1.5)
         if angle < 50 and accel < 2.2:
             continue
-        who, d = _nearest_player(shuttle[t], players, t)
-        if who is None:
+        sides = _side_candidates(shuttle[t], players, t)
+        if not sides:
             continue
-        cands.append((t, score, who))
+        cands.append((t, score, sides))
+
+    # Lúc chạm vợt quả cầu hay bị người che / nhoè → quỹ đạo đứt vài khung đúng chỗ đổi hướng.
+    # So hướng bay ngay trước và ngay sau đoạn mất dấu ngắn.
+    idx = np.flatnonzero(valid)
+    for a, b in zip(idx[:-1], idx[1:]):
+        if not (2 <= b - a <= int(0.5 * fps)) or a < 3 or b + 3 >= n:
+            continue
+        before, after = shuttle[a - 3:a + 1], shuttle[b:b + 4]
+        if np.isnan(before).any() or np.isnan(after).any():
+            continue
+        v1, v2 = before[-1] - before[0], after[-1] - after[0]
+        s1, s2 = np.hypot(*v1), np.hypot(*v2)
+        if s1 < 2 or s2 < 3:
+            continue
+        angle = np.degrees(np.arccos(np.clip(np.dot(v1, v2) / (s1 * s2), -1, 1)))
+        if angle < 60:
+            continue
+        t = (a + b) // 2
+        sides = _side_candidates((shuttle[a] + shuttle[b]) / 2, players, t)
+        if sides:
+            cands.append((t, angle / 60, sides))
 
     # Một cú đánh có thể sinh nhiều ứng viên liền nhau → giữ cái mạnh nhất trong 8 khung.
     cands.sort(key=lambda c: -c[1])
     taken = []
-    for t, sc, who in cands:
-        if all(abs(t - u) > 8 for u, _, _ in taken):
-            taken.append((t, sc, who))
-    taken.sort()
+    for c in cands:
+        if all(abs(c[0] - u[0]) > 8 for u in taken):
+            taken.append(c)
+    taken.sort(key=lambda c: c[0])
 
-    hits = []
-    for t, sc, who in taken:
-        if onsets is not None and len(onsets):
-            k = np.abs(onsets * fps - t).argmin()
-            if abs(onsets[k] * fps - t) <= 4:
-                t = int(round(onsets[k] * fps))  # khớp đúng khung có tiếng vợt
-        p = players[who]
-        # Hai bên luân phiên: cùng phía, quá gần nhau → trùng một cú.
-        if hits and hits[-1].side == p.side and t - hits[-1].frame < 0.45 * fps:
-            continue
-        hits.append(Hit(t, p.pid, p.side))
+    # Chia thành các chuỗi liên tục (cách nhau ≤ 3 s), rồi chọn bên đánh theo luật luân phiên.
+    hits, group = [], []
+    for c in taken + [None]:
+        if group and (c is None or (c[0] - group[-1][0]) / fps > 3.0):
+            hits += _assign_sides(group, fps)
+            group = []
+        if c is not None:
+            group.append(c)
+
+    if onsets is not None and len(onsets):
+        for h in hits:
+            k = np.abs(onsets * fps - h.frame).argmin()
+            if abs(onsets[k] * fps - h.frame) <= 4:
+                h.frame = int(round(onsets[k] * fps))  # khớp đúng khung có tiếng vợt
     return hits
 
 
-def _nearest_player(pt, players, t):
-    best, bd = None, 1e9
-    for i, p in enumerate(players):
+def _side_candidates(pt, players, t):
+    """Với mỗi phía sân: (người gần quả cầu nhất, khoảng cách chuẩn hoá theo chiều cao người).
+
+    Chuẩn hoá theo chiều cao để người đứng gần camera (rất to trong hình) không 'hút' hết các cú đánh
+    của người phía xa có quả cầu nằm đè lên khung hình của mình.
+    """
+    best = {}
+    for p in players:
         if not p.seen[t]:
             continue
         x1, y1, x2, y2 = p.box[t]
         w, h = x2 - x1, y2 - y1
-        if not (x1 - 0.8 * w <= pt[0] <= x2 + 0.8 * w and y1 - 0.7 * h <= pt[1] <= y2 - 0.25 * h):
+        if h < 1 or not (x1 - 0.8 * w <= pt[0] <= x2 + 0.8 * w and y1 - 0.7 * h <= pt[1] <= y2 - 0.25 * h):
             continue
         wr = p.wrist[t]
-        d = min(np.hypot(*(pt - wr[0])), np.hypot(*(pt - wr[1])), np.hypot(pt[0] - (x1 + x2) / 2, pt[1] - y1))
-        if d < bd:
-            best, bd = i, d
-    return best, bd
+        d = min(np.hypot(*(pt - wr[0])), np.hypot(*(pt - wr[1])), np.hypot(pt[0] - (x1 + x2) / 2, pt[1] - y1)) / h
+        if d < best.get(p.side, (None, 9))[1]:
+            best[p.side] = (p.pid, d)
+    return best
 
 
-def estimate_speeds(hits, shuttle, players, court, fps):
+def _assign_sides(group, fps, skip_penalty=1.1):
+    """Viterbi: chọn phía đánh cho cả chuỗi sao cho hai bên luân phiên. Cú không hợp lý thì bỏ (nhận nhầm).
+
+    Hai cú liên tiếp cùng phía nghĩa là đã sót một cú của bên kia ở giữa: chấp nhận dễ nếu hai cú cách nhau
+    đủ lâu để có một lượt bay qua lại (> 1.6 s), gần như không chấp nhận nếu quá sát (< 0.8 s).
+    """
+    INF = 1e9
+
+    def cost(c, s):
+        return min(c[2][s][1], 1.5) if s in c[2] else INF
+
+    def same_side_penalty(dt):
+        return 0.2 if dt > 1.6 else (0.8 if dt > 0.8 else 2.5)
+
+    # trạng thái: phía của cú được giữ gần nhất (0/1) hoặc -1 (chưa giữ cú nào); lưu cả khung của cú đó
+    best = {-1: (0.0, [], None)}
+    for k, c in enumerate(group):
+        nxt = {}
+        for last, (acc, path, last_f) in best.items():
+            cand = (acc + skip_penalty, path, last_f)  # bỏ cú này
+            if cand[0] < nxt.get(last, (INF,))[0]:
+                nxt[last] = cand
+            for s in (0, 1):
+                e = cost(c, s)
+                if e >= INF:
+                    continue
+                tr = same_side_penalty((c[0] - last_f) / fps) if last == s else 0.0
+                cand = (acc + e + tr, path + [(k, s)], c[0])
+                if cand[0] < nxt.get(s, (INF,))[0]:
+                    nxt[s] = cand
+        best = nxt
+    _, path, _ = min(best.values(), key=lambda v: v[0])
+    return [Hit(int(group[k][0]), int(group[k][2][s][0]), s) for k, s in path]
+
+
+def estimate_speeds(hits, shuttle, players, courts, fps):
+    """courts.at(khung) → Court tại khung đó (máy quay có thể xê dịch)."""
     by_pid = {p.pid: p for p in players}
     for k, h in enumerate(hits):
         p = by_pid.get(h.player)
@@ -246,7 +324,7 @@ def estimate_speeds(hits, shuttle, players, court, fps):
             dirs = steps / np.maximum(lens[:, None], 1e-6)
             # Chỉ tin khi 5 khung sau cú đánh bay thẳng một hướng (không phải nhận nhầm nhảy lung tung).
             if lens.min() > 2 and (dirs[1:] * dirs[:-1]).sum(1).min() > 0.8:
-                ppm = court.px_per_meter(p.pos[h.frame])
+                ppm = courts.at(h.frame).px_per_meter(p.pos[h.frame])
                 if ppm > 1:
                     v_img = float(np.median(lens)) * fps / ppm  # m/s, chỉ phần song song mặt ảnh
         v_flight = 0.0
@@ -254,9 +332,9 @@ def estimate_speeds(hits, shuttle, players, court, fps):
             nxt = hits[k + 1]
             q = by_pid.get(nxt.player)
             dt = (nxt.frame - h.frame) / fps
-            if q is not None and nxt.side != h.side and 0.2 < dt < 3 and not np.isnan(q.pos[nxt.frame]).any():
+            if q is not None and nxt.side != h.side and 0.3 <= dt < 3 and not np.isnan(q.pos[nxt.frame]).any():
                 x = np.hypot(*(q.pos[nxt.frame] - p.pos[h.frame]))
-                if x > 1:
+                if 2 <= x <= 14:  # ngoài khoảng này là vị trí người bị nhiễu
                     v_flight = (np.exp(SHUTTLE_K * x) - 1) / (SHUTTLE_K * dt)
         # Ưu tiên ước tính theo thời gian bay (bền hơn); số đo trên ảnh chỉ dùng khi lệch không quá xa.
         if v_flight and v_img:
@@ -264,10 +342,10 @@ def estimate_speeds(hits, shuttle, players, court, fps):
         else:
             v = v_flight or v_img * 1.15
         if v > 0:
-            h.speed_kmh = float(np.clip(v * 3.6, 15, 350))
+            h.speed_kmh = float(np.clip(v * 3.6, 15, 320))
 
 
-def build_rallies(hits, shuttle, court, fps, gap_s=3.0):
+def build_rallies(hits, shuttle, courts, fps, gap_s=3.0):
     rallies, cur = [], []
     for h in hits:
         if cur and (h.frame - cur[-1].frame) / fps > gap_s:
@@ -294,7 +372,7 @@ def build_rallies(hits, shuttle, court, fps, gap_s=3.0):
                 land = shuttle[f]
         r = Rally(hs[0].frame, max(end, last + int(0.3 * fps)), hs)
         if land is not None:
-            lx, ly = court.to_court([land])[0]
+            lx, ly = courts.at(last).to_court([land])[0]
             r.land_court = (float(lx), float(ly))
             r.land_in = bool(-0.1 <= lx <= C.W + 0.1 and -0.1 <= ly <= C.L + 0.1)
         out.append(r)

@@ -75,7 +75,15 @@ class TrackNetRunner:
 
 def plan_tiles(court, frame_w, frame_h):
     """Các ô 16:9 phủ vùng sân và khoảng không phía trên (cầu bay cao)."""
-    x, y, w, h = court.roi(frame_w, frame_h, margin_m=(1.0, 2.0), head_m=4.0)
+    return tiles_for_rect(court.roi(frame_w, frame_h, margin_m=(1.0, 2.0), head_m=SKY_M), frame_w, frame_h)
+
+
+SKY_M = 6.0  # quét cầu tới độ cao ~6 m (máy đặt thấp thì cầu bay cao chiếm nhiều phần trên khung hình)
+MAX_TILES = 4
+
+
+def tiles_for_rect(rect, frame_w, frame_h):
+    x, y, w, h = rect
     tile_h = int(round(w * 9 / 16))
     if tile_h >= h:
         # Video ngang: một ô, mở rộng theo chiều dọc cho đủ 16:9.
@@ -85,6 +93,10 @@ def plan_tiles(court, frame_w, frame_h):
         tx = int(np.clip(x + w / 2 - tw / 2, 0, frame_w - tw))
         return [(tx, ty, tw, th)]
     n = int(np.ceil((h - tile_h) / (tile_h * 0.9))) + 1
+    if n > MAX_TILES:  # quá cao: bỏ bớt phần trời trên cùng, giữ phần sân
+        n = MAX_TILES
+        covered = int(tile_h * (1 + 0.9 * (n - 1)))
+        y, h = y + h - covered, covered
     step = (h - tile_h) / max(1, n - 1)
     return [(x, int(y + i * step), w, tile_h) for i in range(n)]
 
@@ -121,6 +133,17 @@ def sample_frames(video_path, frame_w, frame_h, duration, max_frames=150):
         # Video ít keyframe (thường là clip ngắn đã qua mạng xã hội): lấy đều ~40 khung.
         frames = run(["-i", str(video_path), "-vf", f"fps={min(4.0, 40 / max(duration, 1)):.4f}"], 1)
     return frames[::max(1, len(frames) // max_frames)]
+
+
+def segment_frames(video_path, frame_w, frame_h, start_s, dur_s, n=30):
+    """~n khung rải đều trong một đoạn (để tính ảnh nền riêng cho đoạn máy quay đứng ở vị trí đó)."""
+    import subprocess
+    size = frame_w * frame_h * 3
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{start_s:.3f}", "-t", f"{dur_s:.3f}", "-i", str(video_path),
+           "-vf", f"fps={min(4.0, n / max(dur_s, 0.5)):.4f}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    raw = subprocess.run(cmd, capture_output=True).stdout
+    return [np.frombuffer(raw[i:i + size], np.uint8).reshape(frame_h, frame_w, 3)
+            for i in range(0, len(raw) - size + 1, size)]
 
 
 def median_background(frames, tiles):
@@ -164,6 +187,13 @@ class ShuttleTracker:
             self.window = []
             if len(self.pending) >= self.batch_windows:
                 self._run()
+
+    def set_medians(self, medians):
+        """Đổi ảnh nền (máy quay sang vị trí mới): chạy hết các cửa sổ đang chờ bằng ảnh nền cũ trước."""
+        self.gap()
+        if self.pending:
+            self._run()
+        self.medians = medians
 
     def gap(self):
         """Báo chuỗi khung bị ngắt (đoạn nghỉ được bỏ qua): khép cửa sổ đang dở bằng cách lặp khung cuối."""
