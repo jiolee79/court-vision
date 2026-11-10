@@ -121,7 +121,7 @@ class HudRenderer:
         self.hits = sorted(hits, key=lambda h: h.frame)
         self.shuttle = shuttle
         self.courts = courts
-        self.hud_w = int(min(W - 28 * self.s, 700 * self.s))
+        self.hud_w = int(min(W - 28 * self.s, 500 * self.s))
         self.color = {p.pid: COLORS[i % 4] for i, p in enumerate(players)}
         self.tags = {p.pid: self._name_tag(p.name, self.color[p.pid]) for p in players}
         self.hit_frames = np.array([h.frame for h in self.hits]) if self.hits else np.array([], int)
@@ -324,67 +324,62 @@ class HudRenderer:
         return np.array(img)
 
     def _hud(self, f, hit):
+        """Bảng gọn: một thanh thông số rally, bên dưới là danh sách người chơi và sơ đồ sân nhỏ."""
         s, hw = self.s, self.hud_w
-        gap, top_h = 8 * s, 74 * s
-        row_h = 44 * s
-        tbl_h = row_h * len(self.players) + 8 * s
+        gap, top_h, row_h = 6 * s, 34 * s, 21 * s
+        tbl_h = row_h * len(self.players) + 10 * s
         img = Image.new("RGBA", (hw + 2, int(top_h + gap + tbl_h + 2)), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
 
         rally_t, count, active = self._rally_state(f)
         flash = hit is not None and 0 <= f - hit.frame < 0.4 * self.fps
         speed = next((h.speed_kmh for h in reversed(self.hits[:np.searchsorted(self.hit_frames, f, side="right")]) if h.speed_kmh), 0)
-        w1, w2 = hw * 0.4, hw * 0.27
-        w3 = hw - w1 - w2 - 2 * gap
-        self._stat(d, 0, 0, w1, top_h, "RALLY TIME", fmt_clock(rally_t), "", False)
-        self._stat(d, w1 + gap, 0, w2, top_h, "RALLY COUNT", str(count), "SHOTS", flash)
-        self._stat(d, w1 + w2 + 2 * gap, 0, w3, top_h, "SHOT SPEED", str(int(round(speed))) if speed else "--", "KM/H", False)
+        self._panel(d, 0, 0, hw, top_h)
+        mid = top_h / 2
+        d.ellipse([11 * s, mid - 3.5 * s, 18 * s, mid + 3.5 * s], fill=(110, 231, 135, 255) if active else (255, 255, 255, 70))
+        cells = [("RALLY", fmt_clock(rally_t), "", 0.40), ("SHOTS", str(count), "", 0.25),
+                 ("SPEED", str(int(round(speed))) if speed else "--", "km/h", 0.35)]
+        x = 26 * s
+        span = hw - x
+        lab, big = font(9 * s), font(19 * s)
+        for i, (label, value, unit, frac) in enumerate(cells):
+            if i:
+                d.line([x - 10 * s, 9 * s, x - 10 * s, top_h - 9 * s], fill=EDGE, width=max(1, int(s)))
+            d.text((x, mid + s), label, font=lab, fill=LABEL, anchor="lm")
+            vx = x + lab.getlength(label) + 7 * s
+            d.text((vx, mid), value, font=big, fill=(ACCENT + (255,)) if (flash and i == 1) else WHITE, anchor="lm")
+            if unit:
+                d.text((vx + big.getlength(value) + 4 * s, mid + 3 * s), unit, font=font(9 * s, bold=False), fill=LABEL, anchor="lm")
+            x += span * frac
 
         y2 = top_h + gap
-        tw = hw * 0.5
+        tw = hw * 0.56
         self._panel(d, 0, y2, tw, tbl_h)
+        name_f, val_f, small = font(12 * s), font(11 * s), font(9 * s, bold=False)
+        bx0, bx1 = tw * 0.40, tw * 0.66
         for i, p in enumerate(self.players):
             col = self.color[p.pid] + (255,)
-            ry = y2 + 4 * s + i * row_h
-            d.rectangle([3 * s, ry + 6 * s, 6 * s, ry + row_h - 6 * s], fill=col)
-            d.text((10 * s, ry + 4 * s), p.name.upper(), font=font(17 * s), fill=col)
+            cy = y2 + 5 * s + i * row_h + row_h / 2
+            d.rounded_rectangle([8 * s, cy - 6 * s, 11 * s, cy + 6 * s], radius=int(1.5 * s), fill=col)
+            d.text((17 * s, cy), p.name.upper(), font=name_f, fill=WHITE, anchor="lm")
             stamina = int(round(p.stamina[f]))
-            self._labeled(d, "STAMINA", str(stamina), tw - 10 * s, ry + 4 * s, 17 * s)
-            n = 20
-            filled = round(stamina / 100 * n)
-            bw = tw * 0.62
-            for k in range(n):
-                x = 10 * s + k * bw / n
-                d.rectangle([x, ry + 27 * s, x + bw / n - 1.5 * s, ry + 33 * s], fill=col if k < filled else (255, 255, 255, 30))
-            self._labeled(d, "MOVE", f"{p.dist[f]:.1f} m", tw - 10 * s, ry + 26 * s, 12 * s)
+            d.rounded_rectangle([bx0, cy - 1.5 * s, bx1, cy + 1.5 * s], radius=int(1.5 * s), fill=(255, 255, 255, 36))
+            d.rounded_rectangle([bx0, cy - 1.5 * s, bx0 + (bx1 - bx0) * max(0.02, stamina / 100), cy + 1.5 * s],
+                                radius=int(1.5 * s), fill=col)
+            d.text((bx1 + 5 * s, cy), str(stamina), font=small, fill=LABEL, anchor="lm")
+            d.text((tw - 9 * s, cy), f"{p.dist[f]:.0f} m", font=val_f, fill=WHITE, anchor="rm")
 
         self._court_map(d, tw + gap, y2, hw - tw - gap, tbl_h, f)
         return np.array(img)
 
     def _panel(self, d, x, y, w, h, hl=False):
         d.rounded_rectangle([x, y, x + w, y + h], radius=int(8 * self.s), fill=PANEL,
-                            outline=(ACCENT + (255,)) if hl else EDGE, width=max(1, int(1.2 * self.s)))
-
-    def _stat(self, d, x, y, w, h, label, value, unit, hl):
-        s = self.s
-        self._panel(d, x, y, w, h, hl)
-        d.text((x + 12 * s, y + 8 * s), label, font=font(12 * s), fill=LABEL)
-        big = font(34 * s)
-        d.text((x + 12 * s, y + h - 8 * s), value, font=big, fill=WHITE, anchor="ls")
-        if unit:
-            d.text((x + 16 * s + big.getlength(value), y + h - 10 * s), unit, font=font(12 * s), fill=LABEL, anchor="ls")
-
-    def _labeled(self, d, label, value, right, y, size):
-        f = font(size)
-        d.text((right, y), value, font=f, fill=WHITE, anchor="ra")
-        d.text((right - f.getlength(value) - 6 * self.s, y + size * 0.35), label, font=font(9 * self.s), fill=LABEL, anchor="ra")
+                            outline=(ACCENT + (255,)) if hl else EDGE, width=max(1, int(1.0 * self.s)))
 
     def _court_map(self, d, x, y, w, h, f):
         s = self.s
         self._panel(d, x, y, w, h)
-        d.text((x + 10 * s, y + 8 * s), "COURT MAP", font=font(11 * s), fill=LABEL)
-        d.text((x + w - 10 * s, y + 9 * s), "PLAYER POSITIONS", font=font(9 * s), fill=LABEL, anchor="ra")
-        ax, ay, aw, ah = x + 10 * s, y + 26 * s, w - 20 * s, h - 46 * s
+        ax, ay, aw, ah = x + 8 * s, y + 8 * s, w - 16 * s, h - 16 * s
         k = min(aw / C.L, ah / C.W)
         cw, ch = C.L * k, C.W * k
         ox, oy = ax + (aw - cw) / 2, ay + (ah - ch) / 2
@@ -392,23 +387,21 @@ class HudRenderer:
         def mp(cx, cy):
             return ox + (C.L - cy) / C.L * cw, oy + cx / C.W * ch
 
-        d.rectangle([ox, oy, ox + cw, oy + ch], fill=(30, 110, 90, 110))
+        d.rectangle([ox, oy, ox + cw, oy + ch], fill=(30, 110, 90, 90))
         for x1, y1, x2, y2 in C.court_lines():
-            d.line([mp(x1, y1), mp(x2, y2)], fill=(255, 255, 255, 140), width=max(1, int(s)))
-        d.line([mp(0, C.NET), mp(C.W, C.NET)], fill=ACCENT + (255,), width=max(1, int(2 * s)))
+            d.line([mp(x1, y1), mp(x2, y2)], fill=(255, 255, 255, 90), width=max(1, int(s)))
+        d.line([mp(0, C.NET), mp(C.W, C.NET)], fill=ACCENT + (255,), width=max(1, int(1.5 * s)))
         trail = int(1.5 * self.fps)
         for p in self.players:
             col = self.color[p.pid]
-            seg = p.pos[max(0, f - trail):f + 1]
+            seg = self.spos[p.pid][max(0, f - trail):f + 1]
             pts = [mp(*q) for q in seg if not np.isnan(q[0])]
             if len(pts) > 1:
-                d.line(pts, fill=col + (130,), width=max(1, int(1.5 * s)))
-            if not np.isnan(p.pos[f, 0]):
-                px, py = mp(*p.pos[f])
-                r = 5 * s
-                d.ellipse([px - r, py - r, px + r, py + r], fill=col + (255,), outline=WHITE, width=max(1, int(1.2 * s)))
-        d.text((x + 10 * s, y + h - 6 * s), "OUR TEAM", font=font(9 * s), fill=LABEL, anchor="ls")
-        d.text((x + w - 10 * s, y + h - 6 * s), "OPPONENTS", font=font(9 * s), fill=LABEL, anchor="rs")
+                d.line(pts, fill=col + (120,), width=max(1, int(1.2 * s)))
+            if not np.isnan(seg[-1][0]):
+                px, py = mp(*seg[-1])
+                r = 3.6 * s
+                d.ellipse([px - r, py - r, px + r, py + r], fill=col + (255,), outline=WHITE, width=max(1, int(s)))
 
 
 SYNC_BACK = 90  # số khung phân tích phía trước a0 dùng để dò vị trí sau khi tua
