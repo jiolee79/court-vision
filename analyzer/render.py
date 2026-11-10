@@ -43,18 +43,102 @@ def blend(frame, rgba, x, y):
     frame[y0:y1, x0:x1] = cv2.add(keep, cv2.multiply(bgr, a, scale=1 / 255))
 
 
+SHIFT = 4  # toạ độ lẻ 1/16 pixel khi vẽ → nét không giật theo từng pixel
+RING_M = 0.42  # bán kính vòng khoá người trên mặt sân (m)
+
+
+def _fx(pts):
+    return np.round(np.asarray(pts, np.float64) * (1 << SHIFT)).astype(np.int32)
+
+
+def _smooth(arr, ok, win):
+    """Làm mượt theo thời gian (Gauss, bỏ qua khung mất dấu)."""
+    a = arr.reshape(len(arr), -1).astype(np.float64)
+    ok = ok & ~np.isnan(a).any(1)
+    x = np.arange(-win, win + 1)
+    ker = np.exp(-0.5 * (x / max(1.0, win / 2)) ** 2)
+    den = np.convolve(ok.astype(np.float64), ker, "same")
+    out = np.full_like(a, np.nan)
+    for d in range(a.shape[1]):
+        num = np.convolve(np.where(ok, a[:, d], 0.0), ker, "same")
+        out[:, d] = np.where(ok, num / np.maximum(den, 1e-9), np.nan)
+    return out.reshape(arr.shape)
+
+
+def _project(court, pts, limit):
+    """Chiếu điểm mặt sân (m) lên ảnh; bỏ điểm sau lưng camera hoặc văng quá xa khung hình."""
+    p = np.c_[np.asarray(pts, np.float64), np.ones(len(pts))] @ court.Hinv.T
+    ok = p[:, 2] > 1e-6
+    xy = np.full((len(pts), 2), np.nan)
+    xy[ok] = p[ok, :2] / p[ok, 2:3]
+    ok &= (np.abs(np.nan_to_num(xy, nan=1e9)) < limit).all(1)
+    return xy, ok
+
+
+def _runs(xy, ok):
+    """Tách dãy điểm thành các đoạn liền nhau còn nhìn thấy."""
+    out, cur = [], []
+    for q, k in zip(xy, ok):
+        if k:
+            cur.append(q)
+        else:
+            if len(cur) > 1:
+                out.append(np.array(cur))
+            cur = []
+    if len(cur) > 1:
+        out.append(np.array(cur))
+    return out
+
+
+def _paint(frame, polys, color, alpha, thick=1, closed=False, fill=False):
+    """Vẽ nét/đa giác bán trong suốt, chỉ xử lý vùng ảnh bao quanh hình."""
+    if alpha <= 0.02 or not polys:
+        return
+    allp = np.concatenate(polys)
+    H, W = frame.shape[:2]
+    pad = thick + 2
+    x0, y0 = np.floor(allp.min(0)).astype(int) - pad
+    x1, y1 = np.ceil(allp.max(0)).astype(int) + pad
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
+    if x0 >= x1 or y0 >= y1:
+        return
+    crop = frame[y0:y1, x0:x1]
+    ov = crop.copy()
+    pts = [_fx(q - (x0, y0)) for q in polys]
+    if fill:
+        cv2.fillPoly(ov, pts, color, cv2.LINE_AA, SHIFT)
+    else:
+        cv2.polylines(ov, pts, closed, color, thick, cv2.LINE_AA, SHIFT)
+    cv2.addWeighted(ov, alpha, crop, 1 - alpha, 0, dst=crop)
+
+
 class HudRenderer:
-    def __init__(self, W, H, players, rallies, hits, shuttle, fps):
+    def __init__(self, W, H, players, rallies, hits, shuttle, fps, courts=None):
         self.W, self.H, self.fps = W, H, fps
         self.s = min(W, H) / 720
         self.players = players
         self.rallies = rallies
         self.hits = sorted(hits, key=lambda h: h.frame)
         self.shuttle = shuttle
+        self.courts = courts
         self.hud_w = int(min(W - 28 * self.s, 700 * self.s))
         self.color = {p.pid: COLORS[i % 4] for i, p in enumerate(players)}
         self.tags = {p.pid: self._name_tag(p.name, self.color[p.pid]) for p in players}
         self.hit_frames = np.array([h.frame for h in self.hits]) if self.hits else np.array([], int)
+        # Vị trí/khung người đã làm mượt + độ đậm (mờ dần khi vừa thấy / sắp mất dấu) → vòng không giật, không chớp.
+        win = max(2, int(round(fps * 0.16)))
+        fade = np.ones(2 * max(2, int(round(fps * 0.2))) + 1)
+        self.spos, self.sbox, self.vis = {}, {}, {}
+        for p in players:
+            self.spos[p.pid] = _smooth(p.pos, p.seen, win)
+            self.sbox[p.pid] = _smooth(p.box, p.seen, win)
+            v = np.convolve(p.seen.astype(np.float64), fade / fade.sum(), "same")
+            self.vis[p.pid] = np.clip((v - 0.5) * 2.2, 0, 1) * p.seen
+        ang = np.radians(np.arange(0, 361, 6))
+        self.circle = np.c_[np.cos(ang), np.sin(ang)] * RING_M
+        self.arcs = [np.c_[np.cos(t), np.sin(t)] * RING_M
+                     for t in (np.radians(np.arange(c - 30, c + 31, 5)) for c in (45, 135, 225, 315))]
+        self._court_cache = {}
 
     # ---------- trạng thái tại khung f
     def _rally_state(self, f):
@@ -77,77 +161,166 @@ class HudRenderer:
     # ---------- vẽ
     def draw(self, frame, f):
         s = self.s
-        self._draw_shuttle(frame, f)
+        court = self.courts.at(f) if self.courts is not None else None
+        if court is not None:
+            self._draw_court(frame, f)
         for p in self.players:
-            if p.seen[f]:
-                self._draw_player(frame, p, f)
+            if self.vis[p.pid][f] > 0.02:
+                self._draw_player(frame, p, f, court)
+        self._draw_shuttle(frame, f)
         hit = self._last_hit(f)
         if hit and hit.speed_kmh and (f - hit.frame) < 1.8 * self.fps:
             p = next((q for q in self.players if q.pid == hit.player), None)
-            if p is not None and p.seen[f]:
-                x1, y1, x2, y2 = p.box[f]
-                blend(frame, self._shot_tag(int(round(hit.speed_kmh))), int(x2 + 6 * s), int(y1 + (y2 - y1) * 0.15))
+            if p is not None and self.vis[p.pid][f] > 0.5 and not np.isnan(self.sbox[p.pid][f, 0]):
+                x1, y1, x2, y2 = self.sbox[p.pid][f]
+                tag = self.tags[p.pid]
+                blend(frame, self._shot_tag(int(round(hit.speed_kmh))), int(round((x1 + x2) / 2 + tag.shape[1] / 2 + 4 * s)),
+                      int(round(y1 - tag.shape[0] - 6 * s)))
         blend(frame, self._hud(f, hit), int(14 * s), int(14 * s))
 
-    def _draw_shuttle(self, frame, f):
-        s = self.s
-        a = max(0, f - 10)
-        pts = self.shuttle[a:f + 1]
-        prev = None
-        for i, p in enumerate(pts):
-            if np.isnan(p[0]):
-                prev = None
-                continue
-            q = (int(p[0]), int(p[1]))
-            if prev is not None:
-                t = (i + 1) / len(pts)
-                cv2.line(frame, prev, q, (255, int(208 * t + 47), int(63 * t)), max(1, int(4 * s * t)), cv2.LINE_AA)
-            prev = q
-        cur = self.shuttle[f]
-        if not np.isnan(cur[0]):
-            c = (int(cur[0]), int(cur[1]))
-            r = int(11 * s)
-            cv2.circle(frame, c, r, (255, 230, 120), max(1, int(2 * s)), cv2.LINE_AA)
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                cv2.line(frame, (c[0] + dx * r, c[1] + dy * r), (c[0] + dx * (r + int(7 * s)), c[1] + dy * (r + int(7 * s))),
-                         (255, 230, 120), max(1, int(2 * s)), cv2.LINE_AA)
+    def _draw_court(self, frame, f):
+        """Khung sân tối giản: nền phủ rất nhạt, viền mảnh, 4 góc khoá và dấu chân lưới."""
+        k = self.courts.index(f) if len(self.courts.times) > 1 else 0
+        hit = self._court_cache.get(k)
+        if hit is None:
+            if len(self._court_cache) > 24:
+                self._court_cache.clear()
+            hit = self._court_cache[k] = self._court_layer(self.courts.at(f))
+        if hit[0] is not None:
+            blend(frame, *hit)
 
-    def _draw_player(self, frame, p, f):
+    def _court_layer(self, court):
+        s, W, H = self.s, self.W, self.H
+        lim = 4 * max(W, H)
+        acc = ACCENT
+
+        def line(a, b, n=48):
+            t = np.linspace(0, 1, n)[:, None]
+            a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+            return _runs(*_project(court, a + (b - a) * t, lim))
+
+        cs = [(0, 0), (C.W, 0), (C.W, C.L), (0, C.L)]
+        layer = np.zeros((H, W, 4), np.uint8)
+        t = np.linspace(0, 1, 48, endpoint=False)[:, None]
+        ring = np.concatenate([np.asarray(cs[i], np.float64) + (np.asarray(cs[(i + 1) % 4]) - np.asarray(cs[i])) * t
+                               for i in range(4)])
+        xy, ok = _project(court, ring, lim)
+        if ok.sum() >= 3:
+            cv2.fillPoly(layer, [_fx(xy[ok])], acc + (20,), cv2.LINE_AA, SHIFT)
+        for i in range(4):
+            for run in line(cs[i], cs[(i + 1) % 4]):
+                cv2.polylines(layer, [_fx(run)], False, acc + (90,), max(1, int(round(1.0 * s))), cv2.LINE_AA, SHIFT)
+        leg = 0.9
+        for cx, cy in cs:   # góc khoá chữ L
+            dx = leg if cx == 0 else -leg
+            dy = leg if cy == 0 else -leg
+            # Máy đặt thấp: góc ở xa bị ép dẹt thành một vệt → bỏ, tránh rối.
+            e, eok = _project(court, [(cx, cy), (cx + dx, cy), (cx, cy + dy)], lim)
+            if not eok.all() or np.hypot(*(e[2] - e[0])) < 0.45 * np.hypot(*(e[1] - e[0])):
+                continue
+            for a, b in (((cx, cy), (cx + dx, cy)), ((cx, cy), (cx, cy + dy))):
+                for run in line(a, b, 12):
+                    cv2.polylines(layer, [_fx(run)], False, acc + (230,), max(1, int(round(1.6 * s))),
+                                  cv2.LINE_AA, SHIFT)
+        for a, b in (((0, C.NET), (0.55, C.NET)), ((C.W, C.NET), (C.W - 0.55, C.NET)),
+                     ((0, C.NET - 0.4), (0, C.NET + 0.4)), ((C.W, C.NET - 0.4), (C.W, C.NET + 0.4))):
+            for run in line(a, b, 8):       # dấu chân lưới hai bên
+                cv2.polylines(layer, [_fx(run)], False, acc + (230,), max(1, int(round(1.6 * s))), cv2.LINE_AA, SHIFT)
+        ys, xs = np.nonzero(layer[..., 3])
+        if not len(xs):
+            return None, 0, 0
+        x0, y0, x1, y1 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
+        return np.ascontiguousarray(layer[y0:y1, x0:x1]), int(x0), int(y0)
+
+    def _draw_shuttle(self, frame, f):
+        """Cầu: chấm sáng nhỏ có quầng mờ + vệt đuôi thon dần."""
         s = self.s
-        x1, y1, x2, y2 = p.box[f]
+        n_tail = max(6, int(self.fps * 0.45))
+        a = max(0, f - n_tail)
+        pts = self.shuttle[a:f + 1]
+        ok = ~np.isnan(pts[:, 0])
+        if not ok.any() or (len(pts) - 1 - np.nonzero(ok)[0][-1]) > 2:
+            return
+        pad = int(14 * s) + 2
+        x0, y0 = np.floor(pts[ok].min(0)).astype(int) - pad
+        x1, y1 = np.ceil(pts[ok].max(0)).astype(int) + pad
+        w, h = int(x1 - x0), int(y1 - y0)
+        if w <= 0 or h <= 0 or w * h > 4_000_000:
+            return
+        m = np.zeros((h, w), np.uint8)
+        off = np.array([x0, y0])
+        for i in range(1, len(pts)):
+            if ok[i] and ok[i - 1]:
+                t = i / (len(pts) - 1)
+                cv2.line(m, tuple(int(v) for v in _fx(pts[i - 1] - off)), tuple(int(v) for v in _fx(pts[i] - off)),
+                         int(40 + 170 * t ** 1.6), max(1, int(round(3.2 * s * t))), cv2.LINE_AA, SHIFT)
+        rgba = np.empty((h, w, 4), np.uint8)
+        rgba[..., :3] = (255, 226, 130)
+        if ok[-1]:
+            c = tuple(int(v) for v in _fx(pts[-1] - off))
+            g = np.zeros((h, w), np.uint8)
+            cv2.circle(g, c, int(round(7.5 * s * 16)), 120, -1, cv2.LINE_AA, SHIFT)
+            kk = 2 * int(3 * s) + 3
+            m = np.maximum(m, cv2.GaussianBlur(g, (kk, kk), 0))
+            core = np.zeros((h, w), np.uint8)
+            cv2.circle(core, c, int(round(3.0 * s * 16)), 255, -1, cv2.LINE_AA, SHIFT)
+            m = np.maximum(m, core)
+            rgba[..., :3][core > 128] = (255, 255, 255)
+        rgba[..., 3] = m
+        blend(frame, rgba, int(x0), int(y0))
+
+    def _draw_player(self, frame, p, f, court):
+        s = self.s
+        vis = float(self.vis[p.pid][f])
         col = self.color[p.pid][::-1]
-        cx = int((x1 + x2) / 2)
-        w = x2 - x1
-        cv2.ellipse(frame, (cx, int(y2)), (max(int(14 * s), int(w * 0.45)), max(int(5 * s), int(w * 0.14))),
-                    0, 0, 360, col, max(1, int(2.5 * s)), cv2.LINE_AA)
-        tag = self.tags[p.pid]
-        blend(frame, tag, cx - tag.shape[1] // 2, int(y1 - tag.shape[0] - 8 * s))
+        x1, y1, x2, y2 = self.sbox[p.pid][f]
+        cx = (x1 + x2) / 2
+        drawn = False
+        if court is not None and not np.isnan(self.spos[p.pid][f, 0]):
+            # Vòng tròn bán kính cố định (m) nằm trên mặt sân, chiếu theo phối cảnh → luôn "dính" sàn.
+            lim = 4 * max(self.W, self.H)
+            xy, ok = _project(court, self.spos[p.pid][f] + self.circle, lim)
+            if ok.all():
+                _paint(frame, [xy], col, 0.16 * vis, fill=True)
+                _paint(frame, [xy], col, 0.45 * vis, max(1, int(round(1.0 * s))), closed=True)
+                arcs = [_project(court, self.spos[p.pid][f] + a, lim)[0] for a in self.arcs]
+                _paint(frame, arcs, col, 0.95 * vis, max(2, int(round(2.4 * s))))
+                drawn = True
+        if not drawn and not np.isnan(x1):
+            w = x2 - x1
+            el = cv2.ellipse2Poly((int(cx), int(y2)), (max(int(10 * s), int(w * 0.32)), max(int(4 * s), int(w * 0.1))),
+                                  0, 0, 360, 8)
+            _paint(frame, [el.astype(np.float64)], col, 0.9 * vis, max(1, int(round(2 * s))), closed=True)
+        if vis > 0.5 and not np.isnan(x1):
+            tag = self.tags[p.pid]
+            blend(frame, tag, int(round(cx - tag.shape[1] / 2)), int(round(y1 - tag.shape[0] - 6 * s)))
 
     def _name_tag(self, name, color):
         s = self.s
-        fnt = font(15 * s)
+        fnt = font(12 * s)
         text = name.upper()
-        tw = int(fnt.getlength(text) + 18 * s)
-        th = int(15 * s + 12 * s)
-        img = Image.new("RGBA", (tw, th + int(7 * s)), (0, 0, 0, 0))
+        bar = 4 * s
+        tw = int(fnt.getlength(text) + 16 * s + bar)
+        th = int(12 * s + 9 * s)
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.rounded_rectangle([0, 0, tw - 1, th - 1], radius=int(5 * s), fill=PANEL, outline=color + (255,), width=max(1, int(1.5 * s)))
-        d.polygon([(tw / 2 - 5 * s, th - 1), (tw / 2 + 5 * s, th - 1), (tw / 2, th + 6 * s)], fill=color + (255,))
-        d.text((tw / 2, th / 2), text, font=fnt, fill=color + (255,), anchor="mm")
+        d.rounded_rectangle([0, 0, tw - 1, th - 1], radius=int(th / 2), fill=(8, 18, 28, 170))
+        d.rounded_rectangle([5 * s, th * 0.28, 5 * s + bar, th * 0.72], radius=int(bar / 2), fill=color + (255,))
+        d.text((5 * s + bar + 5 * s, th / 2), text, font=fnt, fill=WHITE, anchor="lm")
         return np.array(img)
 
     @lru_cache(maxsize=512)
     def _shot_tag(self, kmh):
         s = self.s
-        fnt, lab = font(14 * s), font(9 * s)
-        text = f"{kmh} km/h"
-        tw = int(fnt.getlength(text) + 52 * s)
-        th = int(14 * s + 12 * s)
+        fnt, lab = font(12 * s), font(9 * s, bold=False)
+        text = str(kmh)
+        tw = int(fnt.getlength(text) + lab.getlength("km/h") + 19 * s)
+        th = int(12 * s + 9 * s)
         img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.rounded_rectangle([0, 0, tw - 1, th - 1], radius=int(5 * s), fill=PANEL, outline=ACCENT + (255,), width=max(1, int(1.5 * s)))
-        d.text((8 * s, th / 2), "SHOT", font=lab, fill=LABEL, anchor="lm")
-        d.text((44 * s, th / 2), text, font=fnt, fill=WHITE, anchor="lm")
+        d.rounded_rectangle([0, 0, tw - 1, th - 1], radius=int(th / 2), fill=ACCENT + (235,))
+        d.text((8 * s, th / 2), text, font=fnt, fill=(6, 20, 32, 255), anchor="lm")
+        d.text((11 * s + fnt.getlength(text), th / 2 + s), "km/h", font=lab, fill=(6, 20, 32, 230), anchor="lm")
         return np.array(img)
 
     def _hud(self, f, hit):

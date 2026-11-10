@@ -272,7 +272,7 @@ def main():
     log(f"Xuất video HUD trên {workers} tiến trình song song…")
     t1 = time.time()
     with tqdm(total=n, desc="Xuất video", unit="khung") as bar:
-        render_video(out_mp4, video, start_f, step, n, (W, H, players, rallies, hits, shuttle_xy, afps), thumbs,
+        render_video(out_mp4, video, start_f, step, n, (W, H, players, rallies, hits, shuttle_xy, afps, courts), thumbs,
                      args.start, (end_f - start_f) / fps, workers, on_progress=bar.update)
     log(f"Xuất video xong sau {time.time() - t1:.0f}s")
 
