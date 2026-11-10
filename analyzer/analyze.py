@@ -196,7 +196,7 @@ def main():
     # --- Lượt 1: nhận diện (lưu lại để lần sau đổi tên / xuất lại video không phải chạy AI lại)
     # Phân tích một đoạn dùng file lưu riêng, không ghi đè kết quả AI của cả video.
     cache_file = video.with_name(stem + ".cvcache.pkl")
-    cache_key = ("v2", start_f, end_f, step, args.quality, ref_court.ref, tuple(map(tuple, np.round(ref_court.corners, 1))),
+    cache_key = ("v3", start_f, end_f, step, args.quality, ref_court.ref, tuple(map(tuple, np.round(ref_court.corners, 1))),
                  round(ref_t, 2), len(seg_starts), tuple(tiles))
     cached = None
     if cache_file.exists():
@@ -252,7 +252,7 @@ def main():
     log(f"Lọc bỏ người không phải VĐV: {d['ngoài sân']} ngoài sân, {d['mép ảnh']} bị mép ảnh cắt, "
         f"{d['chiều cao']} sai kích thước, {d['đứng yên ngoài sân']} đứng yên cạnh sân")
     players = [build_player_series(t, n, afps) for t in ia.players]
-    shuttle_xy = clean_shuttle(raw_shuttle, n, H)
+    shuttle_xy = clean_shuttle(raw_shuttle, n, H, afps)
     hits = detect_hits(shuttle_xy, players, afps, onsets)
     estimate_speeds(hits, shuttle_xy, players, courts, afps)
     rallies = build_rallies(hits, shuttle_xy, courts, afps, players=players)

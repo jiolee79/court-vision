@@ -167,24 +167,32 @@ def calibration_samples(video_path, tiles, medians, n=30):
     return out
 
 
+STRIDE = 4          # mỗi khung được xem trong 2 cửa sổ lệch nhau 4 khung → lấy kết quả tốt hơn của hai lần
+PEAK_MIN = 0.3      # lưu cả đốm yếu; ngưỡng dùng thật nằm ở bước lọc quỹ đạo (events.clean_shuttle)
+
+
 class ShuttleTracker:
-    """Nhận từng khung hình theo thứ tự; gom nhiều cửa sổ 8 khung rồi chạy song song."""
+    """Nhận từng khung hình theo thứ tự; gom nhiều cửa sổ 8 khung (chồng nhau một nửa) rồi chạy song song."""
 
     def __init__(self, runner, tiles, medians, batch_windows=4):
         self.runner = runner
         self.tiles = tiles
         self.medians = medians
         self.batch_windows = batch_windows
-        self.window = []      # [(frame_idx, [tile imgs])]
+        self.window = []      # [(frame_idx, [tile imgs])] — 8 khung gần nhất
+        self.fresh = 0        # số khung trong window chưa nằm trong cửa sổ nào đã gửi
         self.pending = []     # các cửa sổ đủ 8 khung chờ chạy
+        self.heat = {}        # frame → [heatmap từng ô] (lấy max qua các cửa sổ chứa khung đó)
         self.results = {}
         self.conf = {}
 
     def push(self, frame_idx, frame):
         self.window.append((frame_idx, [_prep(frame, t) for t in self.tiles]))
+        self.fresh += 1
         if len(self.window) == SEQ:
             self.pending.append(self.window)
-            self.window = []
+            self.window = self.window[STRIDE:]
+            self.fresh = 0
             if len(self.pending) >= self.batch_windows:
                 self._run()
 
@@ -193,23 +201,26 @@ class ShuttleTracker:
         self.gap()
         if self.pending:
             self._run()
+        self._finalize(None)
         self.medians = medians
 
     def gap(self):
         """Báo chuỗi khung bị ngắt (đoạn nghỉ được bỏ qua): khép cửa sổ đang dở bằng cách lặp khung cuối."""
-        if self.window:
-            last = self.window[-1]
-            while len(self.window) < SEQ:
-                self.window.append((None, last[1]))
-            self.pending.append(self.window)
-            self.window = []
+        if self.fresh:
+            win = list(self.window)
+            while len(win) < SEQ:
+                win.append((None, win[-1][1]))
+            self.pending.append(win)
             if len(self.pending) >= self.batch_windows:
                 self._run()
+        self.window = []
+        self.fresh = 0
 
     def flush(self):
         self.gap()
         if self.pending:
             self._run()
+        self._finalize(None)
         return self.results
 
     def _run(self):
@@ -223,23 +234,33 @@ class ShuttleTracker:
             for k, (f, _) in enumerate(win):
                 if f is None:
                     continue
-                self.results[f], self.conf[f] = self._locate([heats[(w, t)][k] for t in range(len(self.tiles))])
+                hs = [heats[(w, t)][k] for t in range(len(self.tiles))]
+                old = self.heat.get(f)
+                self.heat[f] = hs if old is None else [np.maximum(a, b) for a, b in zip(old, hs)]
         self.pending = []
+        # Khung nào còn nằm trong cửa sổ đang gom thì chờ lần chạy sau mới chốt.
+        self._finalize(self.window[0][0] if self.window else None)
 
-    def _locate(self, hms, max_cands=4):
+    def _finalize(self, before):
+        for f in [f for f in self.heat if before is None or f < before]:
+            self.results[f], self.conf[f] = self._locate(self.heat.pop(f))
+
+    def _locate(self, hms, max_cands=5):
         """Mọi đốm sáng trên heatmap (tối đa vài cái mạnh nhất): cầu thật có thể không phải đốm mạnh nhất
         khi có cầu nằm dưới sàn / cầu sân bên — chọn đúng quả sau, dựa vào đường bay liền mạch."""
         cands = []
         for t, hm in enumerate(hms):
-            if float(hm.max()) < 0.5:
+            if float(hm.max()) < PEAK_MIN:
                 continue
-            mask = (hm > 0.5).astype(np.uint8)
+            mask = (hm > PEAK_MIN).astype(np.uint8)
             cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             tx, ty, tw, th = self.tiles[t]
             for c in cnts:
                 bx, by, bw, bh = cv2.boundingRect(c)
-                peak = float(hm[by:by + bh, bx:bx + bw].max())
-                x, y = tx + (bx + bw / 2) * tw / WIDTH, ty + (by + bh / 2) * th / HEIGHT
+                sub = hm[by:by + bh, bx:bx + bw]
+                peak = float(sub.max())
+                iy, ix = np.unravel_index(int(sub.argmax()), sub.shape)   # đỉnh đốm chính xác hơn tâm khung bao
+                x, y = tx + (bx + ix + 0.5) * tw / WIDTH, ty + (by + iy + 0.5) * th / HEIGHT
                 if all(np.hypot(x - u, y - v) > 12 for u, v, _ in cands):  # ô quét chồng nhau → trùng
                     cands.append((x, y, peak))
         cands.sort(key=lambda c: -c[2])

@@ -27,8 +27,8 @@ Gồm hai phần dùng kết hợp:
 
 Dòng lệnh: `python analyzer/analyze.py video.mp4 --names "A,B,C,D" [--singles] [--start 60 --end 180] [--quality best]`
 
-**Thời gian xử lý** (CPU Intel i7-12700, không cần card đồ hoạ): video quay dọc 7 phút ≈ 12–17 phút
-(nhận diện ~2/3, xuất video ~1/3). Nhanh hơn khi:
+**Thời gian xử lý** (CPU Intel i7-12700, không cần card đồ hoạ): video quay dọc 6–7 phút ≈ 17–20 phút
+(phần lớn là AI bắt cầu: mỗi khung được xem 2 lần để bắt được nhiều cầu hơn). Nhanh hơn khi:
 - quay **ngang** (quét cầu 1 ô thay vì 2);
 - trận có nhiều lúc nghỉ — đoạn không có tiếng vợt > 4 giây được bỏ qua khi quét cầu;
 - chỉ phân tích một đoạn (ô *Chỉ phân tích đoạn*) — kết quả và file lưu AI của đoạn có tên riêng (`…_100-125s_…`), không ghi đè kết quả cả video;
@@ -43,8 +43,10 @@ Quick Sync, xuất video trên nhiều tiến trình song song. Lần chạy đ�
 **Lọc nhiễu (sân đông người):** chỉ nhận người có chân nằm trong sân (lề 1 m hai bên, 2.6 m sau biên cuối),
 bỏ người bị mép ảnh cắt mà đứng ngoài biên, người có kích thước không khớp với vị trí (người ở sân bên/khán đài
 bị chiếu nhầm vào sân), và người đứng yên một chỗ ngoài sân gần như suốt video (trọng tài, người xem).
-Quả cầu: AI giữ vài ứng viên mỗi khung, ghép thành các đường bay liền mạch rồi bỏ cầu nằm yên dưới sàn / cầm
-trên tay và các vệt chập chờn (cầu sân bên). Rally chỉ 1 cú (nhặt cầu, đánh trả cầu) không tính.
+Quả cầu: mỗi khung được AI xem trong 2 cửa sổ lệch nhau, giữ vài ứng viên (kể cả đốm yếu); bỏ các đốm đứng
+yên (cầu nằm dưới sàn, đèn), ghép phần còn lại thành các đường bay theo quán tính, rồi bỏ đoạn quá ngắn và đoạn
+trùng thời gian với một đường bay dài hơn (cầu sân bên). Khi đường bay đứt ngay tại một người chơi giữa hai cú
+thấy rõ (cầu sang phía xa quá nhỏ), chỗ đứt được tính là một cú đánh của người đó. Rally chỉ 1 cú (nhặt cầu, đánh trả cầu) không tính.
 
 **Cách tính:** cú đánh = điểm quỹ đạo cầu đổi hướng/tăng tốc đột ngột (kể cả khi cầu bị che vài khung
 đúng lúc chạm vợt) cạnh một người chơi; bên đánh được chọn cho cả rally theo luật luân phiên (Viterbi),

@@ -6,29 +6,66 @@ import numpy as np
 import court as C
 from players import L_WRIST, R_WRIST
 
+WEAK = 0.8  # điểm của cú đánh suy ra từ chỗ đường bay đứt tại người chơi
 SHUTTLE_K = 9.81 / (6.7 * 6.7)  # lực cản cầu lông: vận tốc rơi tới hạn ~6.7 m/s
 
 
 # ---------------------------------------------------------------- quả cầu
-def _as_cands(v):
+def _as_cands(v, min_peak=0.0):
     """Kết quả mỗi khung: bản cũ là (x, y) hoặc None, bản mới là danh sách (x, y, độ tin)."""
     if v is None:
         return []
     if len(v) and np.ndim(v[0]) == 0:
         return [(float(v[0]), float(v[1]))]
-    return [(float(c[0]), float(c[1])) for c in v]
+    return [(float(c[0]), float(c[1])) for c in v if len(c) < 3 or c[2] >= min_peak]
 
 
-def clean_shuttle(raw, n_frames, frame_h):
+def _drop_static(pts, fps, cell=10.0, win_s=1.0, frac=0.4):
+    """Bỏ ứng viên nằm ở chỗ "lúc nào cũng có đốm sáng" (cầu nằm dưới sàn, đèn, logo): trong ±win_s
+    giây quanh nó, cùng một ô ~10 px xuất hiện ở hơn frac số khung. Cầu đang bay không bao giờ ở yên vậy."""
+    if not pts:
+        return pts
+    P = np.array(pts)
+    f = P[:, 0].astype(int)
+    # Mỗi điểm tính vào 4 ô lệch nửa bước để không bị sót khi rung quanh mép ô.
+    keep = np.ones(len(P), bool)
+    win = int(win_s * fps)
+    for ox, oy in ((0, 0), (0.5, 0), (0, 0.5), (0.5, 0.5)):
+        cx = np.floor(P[:, 1] / cell + ox).astype(int)
+        cy = np.floor(P[:, 2] / cell + oy).astype(int)
+        key = cx * 100003 + cy
+        order = np.lexsort((f, key))
+        ks, fs = key[order], f[order]
+        start = 0
+        for end in range(1, len(ks) + 1):
+            if end == len(ks) or ks[end] != ks[start]:
+                ff = np.unique(fs[start:end])  # các khung có đốm ở ô này
+                if len(ff) >= frac * win:
+                    lo = np.searchsorted(ff, ff - win, "left")
+                    hi = np.searchsorted(ff, ff + win, "right")
+                    dense = (hi - lo) >= frac * (2 * win + 1)
+                    bad = set(ff[dense].tolist())
+                    if bad:
+                        for i in order[start:end]:
+                            if f[i] in bad:
+                                keep[i] = False
+                start = end
+    return [pt for pt, k in zip(pts, keep) if k]
+
+
+def clean_shuttle(raw, n_frames, frame_h, fps=25.0, min_peak=0.35):
     """raw: {frame: ứng viên} → mảng (N, 2) đã lọc nhiễu, NaN = không thấy.
 
-    Ghép các ứng viên thành từng đoạn bay liền mạch; bỏ đoạn đứng yên / trôi chậm (cầu nằm dưới sàn,
-    cầm trên tay, đèn), đoạn quá ngắn (nhận nhầm chập chờn); mỗi khung giữ điểm thuộc đoạn dài nhất.
+    1) Bỏ đốm đứng yên lâu. 2) Ghép ứng viên thành từng đoạn bay theo quán tính (vị trí dự đoán từ vận tốc).
+    3) Bỏ đoạn quá ngắn / gần như không di chuyển. 4) Khi nhiều đoạn chồng thời gian (cầu thật + cầu sân
+    bên), giữ nguyên cả đoạn dài hơn chứ không chọn lẫn lộn từng khung.
     """
-    thr = 0.09 * frame_h  # bước nhảy tối đa mỗi khung
-    pts = [(f, x, y) for f in sorted(raw) if f < n_frames for x, y in _as_cands(raw[f])]
-    segs = []      # mỗi đoạn: list (frame, x, y)
-    alive = []
+    u = frame_h / 1280.0
+    pts = [(f, x, y) for f in sorted(raw) if f < n_frames for x, y in _as_cands(raw[f], min_peak)]
+    pts = _drop_static(pts, fps, cell=10.0 * u)
+
+    first_gate = 0.075 * frame_h   # bước đầu tiên của một đoạn (chưa biết vận tốc)
+    segs, alive = [], []
     for f, x, y in pts:
         alive = [sg for sg in alive if f - sg[-1][0] <= 4]
         best, bd = None, None
@@ -36,8 +73,18 @@ def clean_shuttle(raw, n_frames, frame_h):
             g = f - sg[-1][0]
             if g <= 0:
                 continue
-            d = np.hypot(x - sg[-1][1], y - sg[-1][2])
-            if d <= thr * g and (bd is None or d < bd):
+            lf, lx, ly = sg[-1]
+            if len(sg) >= 2:
+                pf, px, py = sg[-2]
+                vx, vy = (lx - px) / (lf - pf), (ly - py) / (lf - pf)
+                sp = np.hypot(vx, vy)
+                # Cầu chậm dần và cong xuống → cho lệch khỏi đường thẳng một khoảng tỉ lệ tốc độ.
+                d = np.hypot(x - (lx + vx * g), y - (ly + vy * g))
+                gate = (12 * u + 0.6 * sp) * g
+            else:
+                d = np.hypot(x - lx, y - ly)
+                gate = first_gate * g
+            if d <= gate and (bd is None or d < bd):
                 best, bd = sg, d
         if best is None:
             best = [(f, x, y)]
@@ -46,33 +93,31 @@ def clean_shuttle(raw, n_frames, frame_h):
         else:
             best.append((f, x, y))
 
-    p = np.full((n_frames, 2), np.nan)
-    owner = np.zeros(n_frames)
+    good = []
     for sg in segs:
         q = np.array([(x, y) for _, x, y in sg])
         span = sg[-1][0] - sg[0][0] + 1
         extent = np.hypot(*(q.max(0) - q.min(0)))
-        # Quãng di chuyển thật (bỏ rung nhẹ): cầu đang bay đi vài chục px trong vài khung.
-        if len(sg) < 4 or extent < 0.012 * frame_h or (span >= 10 and extent < 1.2 * span):
+        if len(sg) < 4 or extent < 0.012 * frame_h or (span >= 10 and extent < 2.0 * u * span):
             continue
-        # Đoạn dài có những khúc đứng yên lâu (cầu rơi xuống sàn rồi nằm đó) → cắt bỏ khúc đó.
-        keep = np.ones(len(sg), bool)
-        r0 = 0
-        for k in range(1, len(sg) + 1):
-            if k == len(sg) or np.hypot(*(q[k] - q[r0])) > 4:
-                if sg[k - 1][0] - sg[r0][0] >= 10:
-                    keep[r0:k] = False
-                r0 = k
-        score = int(keep.sum())
-        for (f, x, y), kp in zip(sg, keep):
-            if kp and score > owner[f]:
+        path = float(np.hypot(*np.diff(q, axis=0).T).sum())
+        good.append((path, sg))
+
+    p = np.full((n_frames, 2), np.nan)
+    taken = np.zeros(n_frames, bool)
+    for path, sg in sorted(good, key=lambda t: -t[0]):
+        fr = np.array([f for f, _, _ in sg])
+        if taken[fr[0]:fr[-1] + 1].mean() > 0.3:   # trùng thời gian với một đoạn dài hơn → vật khác
+            continue
+        for f, x, y in sg:
+            if not taken[f]:
                 p[f] = (x, y)
-                owner[f] = score
+        taken[fr[0]:fr[-1] + 1] = True
 
     # Lấp khoảng trống ngắn (≤ 4 khung) bằng nội suy, không nối hai vật khác nhau.
     idx = np.flatnonzero(~np.isnan(p[:, 0]))
     for a, b in zip(idx[:-1], idx[1:]):
-        if 1 < b - a <= 5 and np.hypot(*(p[b] - p[a])) <= thr * (b - a):
+        if 1 < b - a <= 5 and np.hypot(*(p[b] - p[a])) <= 0.05 * frame_h * (b - a):
             t = np.linspace(0, 1, b - a + 1)[1:-1, None]
             p[a + 1:b] = p[a] * (1 - t) + p[b] * t
     return p
@@ -252,6 +297,28 @@ def detect_hits(shuttle, players, fps, onsets=None):
         if sides:
             cands.append((t, angle / 60, sides))
 
+    # Đường bay kết thúc / bắt đầu ngay tại một người chơi rồi mất dấu lâu (cầu sang phía xa quá nhỏ,
+    # hoặc bị người che): coi là cú đánh của người đó, điểm thấp hơn cú thấy rõ đổi hướng.
+    long_gap = int(0.5 * fps)
+    runs, start = [], None
+    for i in range(n + 1):
+        if i < n and valid[i]:
+            start = i if start is None else start
+        elif start is not None:
+            runs.append((start, i - 1))
+            start = None
+    for k, (a, b) in enumerate(runs):
+        if b - a < 3:
+            continue
+        prev_end = runs[k - 1][1] if k else -10**9
+        next_start = runs[k + 1][0] if k + 1 < len(runs) else 10**9
+        for t, far in ((b, next_start - b > long_gap), (a, a - prev_end > long_gap)):
+            if not far or not (4 <= t < n - 4):
+                continue
+            sides = {sd: v for sd, v in _side_candidates(shuttle[t], players, t).items() if v[1] <= 0.6}
+            if sides:
+                cands.append((t, WEAK, sides))
+
     # Một cú đánh có thể sinh nhiều ứng viên liền nhau → giữ cái mạnh nhất trong 8 khung.
     cands.sort(key=lambda c: -c[1])
     taken = []
@@ -259,6 +326,20 @@ def detect_hits(shuttle, players, fps, onsets=None):
         if all(abs(c[0] - u[0]) > 8 for u in taken):
             taken.append(c)
     taken.sort(key=lambda c: c[0])
+
+    # Cú "yếu" (suy ra từ chỗ đường bay đứt) chỉ dùng để nối hai cú thấy rõ trong cùng một rally:
+    # cả chuỗi phải liền nhau ≤ 2 s. Cú yếu đứng lẻ lúc nghỉ (nhặt cầu, chuyền cầu) → bỏ.
+    keep, run, last_strong = [], [], None
+    for c in taken:
+        if c[1] != WEAK:
+            chain = ([last_strong] if last_strong else []) + run + [c]
+            if last_strong and run and all((b[0] - a[0]) / fps <= 2.0 for a, b in zip(chain[:-1], chain[1:])):
+                keep += run
+            keep.append(c)
+            run, last_strong = [], c
+        else:
+            run.append(c)
+    taken = keep
 
     # Chia thành các chuỗi liên tục (cách nhau ≤ 3 s), rồi chọn bên đánh theo luật luân phiên.
     hits, group = [], []
