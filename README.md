@@ -11,7 +11,7 @@ Gồm hai phần dùng kết hợp:
 
 ## Công cụ máy tính (chính xác nhất)
 
-**Cài đặt (một lần):** bấm đúp `Cai dat.bat`. Thư viện AI (~1.5 GB) được cài vào
+**Cài đặt (một lần):** bấm đúp `Cai dat.bat`. Phiên bản thư viện được cố định trong `analyzer/requirements.txt` (bộ đã chạy thử). Thư viện AI (~1.5 GB) được cài vào
 `C:\Users\<bạn>\court-vision-ai` (ngoài Dropbox).
 
 **Dùng:** bấm đúp `Phan tich video.bat`
@@ -31,7 +31,7 @@ Dòng lệnh: `python analyzer/analyze.py video.mp4 --names "A,B,C,D" [--singles
 (nhận diện ~2/3, xuất video ~1/3). Nhanh hơn khi:
 - quay **ngang** (quét cầu 1 ô thay vì 2);
 - trận có nhiều lúc nghỉ — đoạn không có tiếng vợt > 4 giây được bỏ qua khi quét cầu;
-- chỉ phân tích một đoạn (ô *Chỉ phân tích đoạn*);
+- chỉ phân tích một đoạn (ô *Chỉ phân tích đoạn*) — kết quả và file lưu AI của đoạn có tên riêng (`…_100-125s_…`), không ghi đè kết quả cả video;
 - chạy lại cùng video (đổi tên, xuất lại): dùng kết quả AI đã lưu (`.cvcache.pkl`), chỉ mất vài phút.
 
 Tăng tốc đã dùng: OpenVINO + nén INT8 cho cả hai mô hình, giải mã và nén video bằng phần cứng Intel

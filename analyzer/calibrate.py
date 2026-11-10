@@ -6,7 +6,7 @@ Phím: Enter/Space = xong · M = đổi bộ điểm mốc · Z = thu nhỏ (đi
 import cv2
 import numpy as np
 
-from court import NET, REFS, W, Court, court_lines
+from court import NET, W, Court, court_lines
 
 WIN = "Hieu chinh san - Court Vision"
 REF_ORDER = ["corners", "net_short", "net_base"]

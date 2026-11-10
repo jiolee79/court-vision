@@ -39,6 +39,19 @@ def read_audio(path, start, dur, sr=22050):
     return (np.frombuffer(raw, np.float32) if raw else None), sr
 
 
+def writable(path):
+    """File kết quả đang mở trong Excel / trình xem video thì không ghi đè được → đổi sang tên khác
+    thay vì báo lỗi sau khi đã phân tích xong."""
+    try:
+        with open(path, "ab"):
+            pass
+        return path
+    except PermissionError:
+        alt = path.with_name(f"{path.stem}_{time.strftime('%H%M%S')}{path.suffix}")
+        log(f"File {path.name} đang được mở ở chương trình khác → lưu thành {alt.name}")
+        return alt
+
+
 def rally_mask(onsets, n, fps, before=2.0, after=3.0, max_gap=4.0):
     """Khung nào có thể đang trong rally: quanh các chuỗi tiếng vợt cách nhau không quá max_gap giây."""
     mask = np.zeros(n, bool)
@@ -136,11 +149,10 @@ def main():
         ref_court, ref_t = res
         save_calibration(court_file, ref_court, ref_t, W, H)
 
-    names = [s.strip() for s in args.names.split(",") if s.strip()]
-    need = 2 if args.singles else 4
-    defaults = ["Người 1", "Người 2", "Người 3", "Người 4"]
-    names = (names + defaults[len(names):need])[:need] if not args.singles else \
-        (names + ["Người 1", "Người 3"][len(names):])[:2]
+    # Giữ đúng vị trí từng ô tên: ô bỏ trống dùng tên mặc định (không dồn tên người sau lên trước).
+    defaults = ["Người 1", "Người 3"] if args.singles else ["Người 1", "Người 2", "Người 3", "Người 4"]
+    given = [s.strip() for s in args.names.split(",")] if args.names.strip() else []
+    names = [(given[i] if i < len(given) and given[i] else d) for i, d in enumerate(defaults)]
 
     # --- Máy quay có bị xê dịch không? Có thì bám theo chuyển động máy để dời sân theo từng khung.
     t0 = time.time()
@@ -182,7 +194,8 @@ def main():
     onsets = audio_onsets(pcm, sr)
 
     # --- Lượt 1: nhận diện (lưu lại để lần sau đổi tên / xuất lại video không phải chạy AI lại)
-    cache_file = video.with_suffix(".cvcache.pkl")
+    # Phân tích một đoạn dùng file lưu riêng, không ghi đè kết quả AI của cả video.
+    cache_file = video.with_name(stem + ".cvcache.pkl")
     cache_key = ("v2", start_f, end_f, step, args.quality, ref_court.ref, tuple(map(tuple, np.round(ref_court.corners, 1))),
                  round(ref_t, 2), len(seg_starts), tuple(tiles))
     cached = None
@@ -249,12 +262,12 @@ def main():
     log(f"Cầu thấy ở {np.mean(~np.isnan(shuttle_xy[:, 0])) * 100:.0f}% khung · {len(hits)} cú đánh · {len(rallies)} rally")
 
     # --- Excel
-    xlsx = out_dir / f"{stem}_thong-ke.xlsx"
+    xlsx = writable(out_dir / f"{stem}_thong-ke.xlsx")
     overview, summary = write_excel(xlsx, players, rallies, hits, afps, args.start)
 
     # --- Lượt 2: xuất video HUD
     cap.release()
-    out_mp4 = out_dir / f"{stem}_HUD.mp4"
+    out_mp4 = writable(out_dir / f"{stem}_HUD.mp4")
     workers = max(1, min(8, (os.cpu_count() or 4) // 3))
     log(f"Xuất video HUD trên {workers} tiến trình song song…")
     t1 = time.time()

@@ -6,8 +6,10 @@ set "BASE=%USERPROFILE%\court-vision-ai"
 set "PY=%BASE%\venv\Scripts\python.exe"
 if not exist "%PY%" python -m venv "%BASE%\venv" || (echo Can cai Python 3.11+ tu python.org & pause & exit /b 1)
 "%PY%" -m pip install --upgrade pip
-"%PY%" -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
-"%PY%" -m pip install ultralytics openvino nncf openpyxl pandas scipy tqdm gdown pillow
+"%PY%" -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0 torchvision==0.29.2
+"%PY%" -m pip install -r "%~dp0analyzer
+equirements.txt"
+if errorlevel 1 (echo. & echo Cai dat thu vien bi loi - kiem tra ket noi mang roi chay lai. & pause & exit /b 1)
 if not exist "%BASE%\models\tracknet\TrackNet_best.pt" (
   echo Dang tai trong so TrackNetV3 ^(MIT License^)...
   mkdir "%BASE%\models\tracknet" 2>nul

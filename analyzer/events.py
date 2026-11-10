@@ -365,8 +365,10 @@ def estimate_speeds(hits, shuttle, players, courts, fps):
             v = max(v_flight, min(v_img * 1.15, v_flight * 1.6))
         else:
             v = v_flight or v_img * 1.15
-        if v > 0:
-            h.speed_kmh = float(np.clip(v * 3.6, 15, 320))
+        # Trên ~300 km/h là sai số vị trí (người phía xa bị ép mỏng), không phải cú đánh thật → để trống
+        # thay vì ghi một con số tối đa giả.
+        if 0 < v * 3.6 <= 300:
+            h.speed_kmh = float(max(15.0, v * 3.6))
 
 
 def build_rallies(hits, shuttle, courts, fps, gap_s=3.0, players=None):
